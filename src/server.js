@@ -6,6 +6,7 @@ import leadsRoutes from './routes/leads.js';
 import dealsRoutes from './routes/deals.js';
 import dashboardRoutes from './routes/dashboard.js';
 import teamRoutes from './routes/team.js';
+import doctorsRoutes from './routes/doctors.js';
 import whatsappWebhook from './webhooks/whatsapp.js';
 import pagarmeWebhook from './webhooks/pagarme.js';
 import kiwifyWebhook from './webhooks/kiwify.js';
@@ -16,10 +17,18 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Log simples de toda requisição recebida — ajuda a confirmar que os
+// webhooks das plataformas de venda estão realmente chegando aqui.
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
+  next();
+});
+
 app.use('/leads', leadsRoutes);
 app.use('/deals', dealsRoutes);
 app.use('/dashboard', dashboardRoutes);
 app.use('/team', teamRoutes);
+app.use('/doctors', doctorsRoutes);
 app.use('/webhooks/whatsapp', whatsappWebhook);
 app.use('/webhooks/pagarme', pagarmeWebhook);
 app.use('/webhooks/kiwify', kiwifyWebhook);
