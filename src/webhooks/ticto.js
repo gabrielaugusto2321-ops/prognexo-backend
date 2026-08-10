@@ -1,25 +1,20 @@
 import { Router } from 'express';
-import { normalizeStatus, registrarTransacao, encontrarDealPorContato } from '../lib/salesWebhook.js';
+import { normalizeStatus, registrarTransacao, encontrarDealPorContato, resolveDoctorFromToken } from '../lib/salesWebhook.js';
 
 const router = Router();
 
-// POST /webhooks/ticto
-// Formato real da Ticto (v2.0): { status: 'authorized'|'refused'|'refunded', token, payment_method,
-//   order: { id, hash, transaction_hash, paid_amount, order_date }, item: { product_name, product_id } }
-// A Ticto valida por um "token" fixo da sua conta, enviado em todo payload —
-// comparamos com o valor salvo no .env.
+// POST /webhooks/ticto?secret=TOKEN_UNICO_DO_MEDICO
 router.post('/', async (req, res) => {
-  const token = req.body?.token;
-  if (token !== process.env.TICTO_TOKEN) {
-    return res.status(401).json({ error: 'Token inválido' });
+  const token = req.query.secret;
+  const doctorId = await resolveDoctorFromToken('ticto', token);
+  if (!doctorId) {
+    return res.status(401).json({ error: 'Token inválido — verifique o link colado no painel da Ticto' });
   }
 
   const body = req.body;
   const rawStatus = body?.status; // 'authorized' | 'refused' | 'refunded'
   const orderId = body?.order?.transaction_hash ?? body?.order?.hash;
   const valor = body?.order?.paid_amount ? body.order.paid_amount / 100 : null;
-  // Confirmar nome exato do campo de contato assim que tivermos um payload real de teste —
-  // a doc pública não deixou claro se vem em "customer" ou dentro de outro objeto.
   const email = body?.customer?.email;
   const telefone = body?.customer?.phone;
 
@@ -27,7 +22,7 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: 'Payload incompleto' });
   }
 
-  const dealId = await encontrarDealPorContato({ email, telefone });
+  const dealId = await encontrarDealPorContato({ email, telefone, doctorId });
 
   await registrarTransacao({
     gateway: 'ticto',
