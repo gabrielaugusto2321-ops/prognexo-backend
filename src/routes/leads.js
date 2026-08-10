@@ -22,9 +22,40 @@ router.get('/', async (req, res) => {
     query = query.eq('sdr_responsavel_id', req.user.id);
   }
 
-  const { data, error } = await query;
+  const { data: leads, error } = await query;
   if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
+
+  // Calcula há quanto tempo cada lead está sem interação, pra sinalizar
+  // "esfriando" sem precisar de nenhum job separado — é só matemática em cima
+  // da última conversa registrada (ou da criação do lead, se nunca respondeu).
+  const leadIds = leads.map((l) => l.id);
+  let ultimaInteracaoPorLead = {};
+
+  if (leadIds.length > 0) {
+    const { data: conversas } = await supabase
+      .from('conversations')
+      .select('lead_id, timestamp_msg')
+      .in('lead_id', leadIds)
+      .order('timestamp_msg', { ascending: false });
+
+    for (const c of conversas || []) {
+      if (!ultimaInteracaoPorLead[c.lead_id]) ultimaInteracaoPorLead[c.lead_id] = c.timestamp_msg;
+    }
+  }
+
+  const agora = Date.now();
+  const enriquecidos = leads.map((lead) => {
+    const referencia = ultimaInteracaoPorLead[lead.id] ?? lead.criado_em;
+    const horasSemInteracao = Math.round((agora - new Date(referencia).getTime()) / 3600000);
+    const etapaAberta = ['lead', 'conversa_iniciada'].includes(lead.status_atual);
+    return {
+      ...lead,
+      horas_sem_interacao: horasSemInteracao,
+      esfriando: etapaAberta && horasSemInteracao >= 4,
+    };
+  });
+
+  res.json(enriquecidos);
 });
 
 // POST /leads — criação manual ou via integração externa (quiz, formulário)
