@@ -1,15 +1,16 @@
 import { Router } from 'express';
-import { normalizeStatus, registrarTransacao } from '../lib/salesWebhook.js';
+import { normalizeStatus, registrarTransacao, resolveDoctorFromToken } from '../lib/salesWebhook.js';
 
 const router = Router();
 
-// POST /webhooks/pagarme
-// A Pagar.me manda o deal_id no metadata da cobrança — é você quem define isso
-// na hora de criar a cobrança (metadata: { deal_id: '...' }).
+// POST /webhooks/pagarme?secret=TOKEN_UNICO_DO_MEDICO
+// O deal_id vem no metadata da cobrança (definido na hora de criá-la) —
+// o token só confirma de qual médico é essa cobrança.
 router.post('/', async (req, res) => {
-  const secret = req.headers['x-webhook-secret'];
-  if (secret !== process.env.PAGARME_WEBHOOK_SECRET) {
-    return res.status(401).json({ error: 'Assinatura inválida' });
+  const token = req.query.secret;
+  const doctorId = await resolveDoctorFromToken('pagarme', token);
+  if (!doctorId) {
+    return res.status(401).json({ error: 'Token inválido' });
   }
 
   const evento = req.body;
