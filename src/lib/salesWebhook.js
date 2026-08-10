@@ -16,6 +16,19 @@ export function normalizeStatus(rawStatus) {
   return STATUS_MAP[rawStatus] ?? 'pendente';
 }
 
+// Descobre a QUEM (qual médico) pertence esse webhook, a partir do token
+// único que o médico colou no próprio painel da plataforma.
+export async function resolveDoctorFromToken(gateway, token) {
+  if (!token) return null;
+  const { data } = await supabase
+    .from('integrations')
+    .select('doctor_id')
+    .eq('gateway', gateway)
+    .eq('webhook_token', token)
+    .maybeSingle();
+  return data?.doctor_id ?? null;
+}
+
 // Grava a transação (idempotente por gateway+id) e, se for pagamento confirmado
 // com deal_id conhecido, fecha o deal e sincroniza o lead automaticamente.
 export async function registrarTransacao({
@@ -52,11 +65,12 @@ export async function registrarTransacao({
   }
 }
 
-// Tenta achar o lead pelo e-mail ou telefone do comprador, quando o gateway
-// não manda o deal_id explicitamente (ex: Kiwify, Hotmart, Ticto não têm
-// campo de metadata customizável como o Pagar.me tem).
-export async function encontrarDealPorContato({ email, telefone }) {
-  let query = supabase.from('leads').select('id, deals(id)').limit(1);
+// Tenta achar o lead pelo e-mail ou telefone do comprador, DENTRO do médico
+// certo (evita cruzar leads de médicos diferentes que usam o mesmo e-mail).
+export async function encontrarDealPorContato({ email, telefone, doctorId }) {
+  if (!doctorId) return null;
+
+  let query = supabase.from('leads').select('id, deals(id)').eq('doctor_id', doctorId).limit(1);
 
   if (email) query = query.eq('email', email);
   else if (telefone) query = query.eq('telefone', telefone.replace(/\D/g, ''));
