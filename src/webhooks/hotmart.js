@@ -1,16 +1,14 @@
 import { Router } from 'express';
-import { normalizeStatus, registrarTransacao, encontrarDealPorContato } from '../lib/salesWebhook.js';
+import { normalizeStatus, registrarTransacao, encontrarDealPorContato, resolveDoctorFromToken } from '../lib/salesWebhook.js';
 
 const router = Router();
 
-// POST /webhooks/hotmart
-// Formato real da Hotmart (Webhook 2.0): { event: 'PURCHASE_APPROVED', data: { buyer, purchase, product } }
-// Autenticação: a Hotmart manda o "Hottok" da sua conta dentro do payload (data.subscription
-// ou no header, dependendo da versão) — comparamos com o valor salvo no .env.
+// POST /webhooks/hotmart?secret=TOKEN_UNICO_DO_MEDICO
 router.post('/', async (req, res) => {
-  const hottok = req.body?.hottok ?? req.headers['x-hotmart-hottok'];
-  if (hottok !== process.env.HOTMART_HOTTOK) {
-    return res.status(401).json({ error: 'Hottok inválido' });
+  const token = req.query.secret;
+  const doctorId = await resolveDoctorFromToken('hotmart', token);
+  if (!doctorId) {
+    return res.status(401).json({ error: 'Token inválido — verifique o link colado no painel da Hotmart' });
   }
 
   const event = req.body?.event; // 'PURCHASE_APPROVED' | 'PURCHASE_CANCELED' | 'PURCHASE_REFUNDED' | 'PURCHASE_CHARGEBACK'
@@ -24,7 +22,7 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: 'Payload incompleto' });
   }
 
-  const dealId = await encontrarDealPorContato({ email, telefone });
+  const dealId = await encontrarDealPorContato({ email, telefone, doctorId });
 
   await registrarTransacao({
     gateway: 'hotmart',
