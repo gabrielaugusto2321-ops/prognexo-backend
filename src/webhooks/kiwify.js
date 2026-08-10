@@ -1,17 +1,15 @@
 import { Router } from 'express';
-import { normalizeStatus, registrarTransacao, encontrarDealPorContato } from '../lib/salesWebhook.js';
+import { normalizeStatus, registrarTransacao, encontrarDealPorContato, resolveDoctorFromToken } from '../lib/salesWebhook.js';
 
 const router = Router();
 
-// POST /webhooks/kiwify
-// Formato real da Kiwify: order_id, order_status ('paid'|'refused'|'refunded'|'chargedback'),
-// payment_method, e um objeto "Customer" com full_name/email/mobile.
-// Kiwify não tem campo de metadata customizável — por isso o deal é achado
-// pelo e-mail/telefone do comprador em vez de vir explícito no payload.
+// POST /webhooks/kiwify?secret=TOKEN_UNICO_DO_MEDICO
+// Cada médico cola essa URL (com o próprio token) no painel dele da Kiwify.
 router.post('/', async (req, res) => {
-  const secret = req.query.secret; // Kiwify permite configurar um token na própria URL do webhook
-  if (secret !== process.env.KIWIFY_WEBHOOK_SECRET) {
-    return res.status(401).json({ error: 'Assinatura inválida' });
+  const token = req.query.secret;
+  const doctorId = await resolveDoctorFromToken('kiwify', token);
+  if (!doctorId) {
+    return res.status(401).json({ error: 'Token inválido — verifique o link colado no painel da Kiwify' });
   }
 
   const body = req.body;
@@ -25,7 +23,7 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: 'Payload incompleto' });
   }
 
-  const dealId = await encontrarDealPorContato({ email, telefone });
+  const dealId = await encontrarDealPorContato({ email, telefone, doctorId });
 
   await registrarTransacao({
     gateway: 'kiwify',
