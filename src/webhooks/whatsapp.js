@@ -43,18 +43,44 @@ router.post('/', async (req, res) => {
 
     if (!integration) return; // número ainda não vinculado a nenhum médico
 
+    // Nome de perfil do WhatsApp de quem mandou a mensagem (se disponível),
+    // usado só na hora de criar um lead novo automaticamente.
+    const contactsPorTelefone = {};
+    for (const c of value?.contacts || []) {
+      contactsPorTelefone[c.wa_id] = c.profile?.name;
+    }
+
     for (const msg of messages) {
       const telefoneNormalizado = msg.from?.replace(/\D/g, '');
       const conteudo = msg.text?.body ?? `[${msg.type}]`;
 
-      const { data: lead } = await supabase
+      let { data: lead } = await supabase
         .from('leads')
         .select('id, status_atual')
         .eq('doctor_id', integration.doctor_id)
         .eq('telefone', telefoneNormalizado)
         .maybeSingle();
 
-      if (!lead) continue;
+      // Número novo, ainda sem lead cadastrado — cria automaticamente em vez
+      // de descartar a mensagem, pra nenhuma conversa recebida se perder.
+      if (!lead) {
+        const { data: novoLead } = await supabase
+          .from('leads')
+          .insert({
+            doctor_id: integration.doctor_id,
+            telefone: telefoneNormalizado,
+            nome: contactsPorTelefone[msg.from] || telefoneNormalizado,
+            status_atual: 'lead',
+            journey_type: 'vendas',
+          })
+          .select('id, status_atual')
+          .single();
+
+        if (!novoLead) continue;
+        lead = novoLead;
+
+        await supabase.from('deals').insert({ lead_id: lead.id, etapa: 'lead' });
+      }
 
       await supabase.from('conversations').insert({
         lead_id: lead.id,
