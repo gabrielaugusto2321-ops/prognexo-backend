@@ -5,6 +5,11 @@ import { requireAuth, getScopedDoctorIds, isScopedToOwnLeadsOnly } from '../midd
 const router = Router();
 router.use(requireAuth);
 
+function iniciais(nome) {
+  if (!nome) return '';
+  return nome.trim().split(/\s+/).slice(0, 2).map((p) => p[0]?.toUpperCase()).join('');
+}
+
 // GET /deals?doctor_id= — retorna deals agrupáveis por etapa no frontend (kanban)
 router.get('/', async (req, res) => {
   const scopedIds = await getScopedDoctorIds(req.user);
@@ -12,7 +17,9 @@ router.get('/', async (req, res) => {
 
   let query = supabase
     .from('deals')
-    .select('*, leads!inner(id, nome, doctor_id, journey_type), products(nome, preco)')
+    .select(
+      '*, leads!inner(id, nome, doctor_id, journey_type), products(nome, preco), sdr:users!deals_sdr_responsavel_id_fkey(nome)'
+    )
     .order('atualizado_em', { ascending: false });
 
   if (doctor_id) query = query.eq('leads.doctor_id', doctor_id);
@@ -25,7 +32,17 @@ router.get('/', async (req, res) => {
 
   const { data, error } = await query;
   if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
+
+  // Achata os campos aninhados no formato que o card do kanban espera
+  const achatados = data.map((deal) => ({
+    ...deal,
+    lead_nome: deal.leads?.nome ?? '',
+    produto: deal.products?.nome ?? '',
+    tipo: deal.leads?.journey_type ?? 'low_ticket',
+    sdr: iniciais(deal.sdr?.nome),
+  }));
+
+  res.json(achatados);
 });
 
 // PATCH /deals/:id/etapa — mover o card no kanban
