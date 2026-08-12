@@ -12,7 +12,8 @@ function requireDoctorOrAdmin(req, res, next) {
   next();
 }
 
-// GET /team?doctor_id= — lista os closers vinculados ao médico
+// GET /team?doctor_id= — lista os closers vinculados ao médico, com quantos
+// leads ativos cada um tem no momento, e se a distribuição automática está ligada
 router.get('/', requireDoctorOrAdmin, async (req, res) => {
   const scopedIds = await getScopedDoctorIds(req.user);
   const { doctor_id } = req.query;
@@ -24,13 +25,58 @@ router.get('/', requireDoctorOrAdmin, async (req, res) => {
     return res.status(403).json({ error: 'Sem acesso a este médico' });
   }
 
-  const { data, error } = await supabase
+  const { data: vinculos, error } = await supabase
     .from('user_doctor_access')
     .select('user_id, users(id, nome, email, ativo, criado_em)')
     .eq('doctor_id', targetDoctorId);
 
   if (error) return res.status(500).json({ error: error.message });
-  res.json(data.map((row) => row.users));
+
+  const { data: doctorRow } = await supabase
+    .from('doctors')
+    .select('distribuicao_automatica')
+    .eq('id', targetDoctorId)
+    .single();
+
+  const membroIds = vinculos.map((v) => v.user_id);
+  const etapasAtivas = ['lead', 'conversa_iniciada', 'reuniao_marcada', 'proposta'];
+
+  let contagem = {};
+  if (membroIds.length > 0) {
+    const { data: leadsAtivos } = await supabase
+      .from('leads')
+      .select('sdr_responsavel_id')
+      .eq('doctor_id', targetDoctorId)
+      .in('status_atual', etapasAtivas)
+      .in('sdr_responsavel_id', membroIds);
+
+    membroIds.forEach((id) => (contagem[id] = 0));
+    (leadsAtivos || []).forEach((l) => {
+      if (l.sdr_responsavel_id) contagem[l.sdr_responsavel_id] = (contagem[l.sdr_responsavel_id] || 0) + 1;
+    });
+  }
+
+  const membros = vinculos.map((v) => ({ ...v.users, leads_ativos: contagem[v.user_id] ?? 0 }));
+
+  res.json({
+    distribuicao_automatica: doctorRow?.distribuicao_automatica ?? false,
+    membros,
+  });
+});
+
+// PATCH /team/distribuicao — liga/desliga a distribuição automática do médico
+router.patch('/distribuicao', requireDoctorOrAdmin, async (req, res) => {
+  const { doctor_id, ativo } = req.body;
+  const scopedIds = await getScopedDoctorIds(req.user);
+
+  if (!doctor_id) return res.status(400).json({ error: 'doctor_id é obrigatório' });
+  if (scopedIds && !scopedIds.includes(doctor_id)) {
+    return res.status(403).json({ error: 'Sem acesso a este médico' });
+  }
+
+  const { error } = await supabase.from('doctors').update({ distribuicao_automatica: !!ativo }).eq('id', doctor_id);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ ok: true, distribuicao_automatica: !!ativo });
 });
 
 // POST /team — convida um novo closer pro médico
