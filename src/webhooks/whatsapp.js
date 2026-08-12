@@ -71,7 +71,7 @@ router.post('/', async (req, res) => {
             telefone: telefoneNormalizado,
             nome: contactsPorTelefone[msg.from] || telefoneNormalizado,
             status_atual: 'lead',
-            journey_type: 'vendas',
+            journey_type: 'low_ticket',
           })
           .select('id, status_atual')
           .single();
