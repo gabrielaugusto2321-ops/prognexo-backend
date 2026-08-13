@@ -49,6 +49,18 @@ router.post('/assinar', async (req, res) => {
 
   const valor = PRECOS[modulo][periodicidade];
 
+  // Confere ANTES de cobrar — evita gerar uma cobrança órfã no Asaas quando
+  // o e-mail já tem conta (ex: pessoa tentando assinar de novo por engano).
+  const { data: usuarioExistente } = await supabase
+    .from('users')
+    .select('id')
+    .eq('email', email)
+    .maybeSingle();
+
+  if (usuarioExistente) {
+    return res.status(409).json({ error: 'Já existe uma conta com esse e-mail. Faça login ou use outro e-mail.' });
+  }
+
   // 1. Cobra o cartão no Asaas ANTES de criar qualquer coisa no Prognexo —
   // se o pagamento falhar, não sobra conta órfã sem assinatura ativa.
   let assinaturaAsaas;
