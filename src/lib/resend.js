@@ -1,8 +1,7 @@
 import 'dotenv/config';
 
-// Enquanto não validamos um domínio próprio no Resend, o remetente precisa
-// ser o domínio de teste deles. Trocar depois de verificar um domínio.
-const REMETENTE_PADRAO = 'Prognexo <onboarding@resend.dev>';
+// Domínio próprio verificado no Resend — libera envio pra qualquer destinatário.
+const REMETENTE_PADRAO = 'Prognexo <contato@prognexo.com.br>';
 
 export async function enviarEmail({ to, subject, html }) {
   const resp = await fetch('https://api.resend.com/emails', {
