@@ -113,6 +113,7 @@ router.post('/assinar', async (req, res) => {
       html: emailBoasVindasHtml({ nome, email, senha, loginUrl: LOGIN_URL }),
     });
   } catch (err) {
+    console.error('[planos/assinar] Falha ao enviar e-mail via Resend:', err.message);
     emailEnviado = false;
   }
 
