@@ -12,11 +12,14 @@ router.post('/', async (req, res) => {
   }
 
   const body = req.body;
-  const rawStatus = body?.status; // 'authorized' | 'refused' | 'refunded'
+  const rawStatus = body?.status; // 'authorized' | 'refused' | 'refunded' | 'chargeback' | outros estados intermediários
   const orderId = body?.order?.transaction_hash ?? body?.order?.hash;
   const valor = body?.order?.paid_amount ? body.order.paid_amount / 100 : null;
   const email = body?.customer?.email;
-  const telefone = body?.customer?.phone;
+  // customer.phone vem como objeto { ddi, ddd, number }, não como string —
+  // remonta pro formato que encontrarDealPorContato espera.
+  const telefoneObj = body?.customer?.phone;
+  const telefone = telefoneObj ? `${telefoneObj.ddi ?? ''}${telefoneObj.ddd ?? ''}${telefoneObj.number ?? ''}` : null;
 
   if (!orderId || !rawStatus) {
     return res.status(400).json({ error: 'Payload incompleto' });

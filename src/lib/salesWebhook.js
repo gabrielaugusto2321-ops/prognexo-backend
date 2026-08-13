@@ -8,8 +8,8 @@ const STATUS_MAP = {
   approved: 'pago', refused: 'recusado', refunded_kiwify: 'estornado', chargedback: 'estornado',
   // Hotmart
   PURCHASE_APPROVED: 'pago', PURCHASE_CANCELED: 'recusado', PURCHASE_REFUNDED: 'estornado', PURCHASE_CHARGEBACK: 'estornado',
-  // Ticto
-  authorized: 'pago', refused_ticto: 'recusado', refunded_ticto: 'estornado',
+  // Ticto (e grafia correta de "chargeback", usada por várias plataformas)
+  authorized: 'pago', refused_ticto: 'recusado', refunded_ticto: 'estornado', chargeback: 'estornado',
 };
 
 export function normalizeStatus(rawStatus) {
