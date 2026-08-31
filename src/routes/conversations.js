@@ -116,8 +116,17 @@ router.post('/send', async (req, res) => {
     .eq('gateway', 'whatsapp')
     .maybeSingle();
 
-  if (!integration?.external_id || !integration?.access_token) {
+  if (!integration?.external_id) {
     return res.status(400).json({ error: 'WhatsApp não configurado para este médico' });
+  }
+
+  // Token de envio: se o médico conectou manualmente (token colado em
+  // Integrações), usa esse. Se conectou pelo Embedded Signup, não existe
+  // token próprio — usa o token fixo do usuário de sistema, que já tem
+  // permissão sobre a WABA dele (compartilhada automaticamente no fluxo).
+  const accessToken = integration.access_token || process.env.META_SYSTEM_USER_TOKEN;
+  if (!accessToken) {
+    return res.status(400).json({ error: 'Nenhum token de envio disponível para este médico' });
   }
 
   // Janela de 24h: só permite texto livre se a última mensagem RECEBIDA
@@ -144,7 +153,7 @@ router.post('/send', async (req, res) => {
   }
 
   try {
-    await sendWhatsAppMessage(integration.external_id, integration.access_token, lead.telefone, texto.trim());
+    await sendWhatsAppMessage(integration.external_id, accessToken, lead.telefone, texto.trim());
   } catch (err) {
     return res.status(502).json({ error: err.message });
   }
