@@ -1,5 +1,8 @@
 import { Router } from 'express';
 import { supabase } from '../lib/supabase.js';
+import { sendWhatsAppMessage } from '../lib/whatsapp.js';
+import { processarMensagemComIA } from '../lib/iaAgent.js';
+import { escolherCloserAutomatico } from '../lib/distribuicao.js';
 
 const router = Router();
 
@@ -36,12 +39,18 @@ router.post('/', async (req, res) => {
     // Descobre de qual médico é esse número
     const { data: integration } = await supabase
       .from('integrations')
-      .select('doctor_id')
+      .select('doctor_id, external_id, access_token')
       .eq('gateway', 'whatsapp')
       .eq('external_id', phoneNumberId)
       .maybeSingle();
 
     if (!integration) return; // número ainda não vinculado a nenhum médico
+
+    const { data: doctor } = await supabase
+      .from('doctors')
+      .select('ia_atendimento_ativo, ia_contexto')
+      .eq('id', integration.doctor_id)
+      .single();
 
     // Nome de perfil do WhatsApp de quem mandou a mensagem (se disponível),
     // usado só na hora de criar um lead novo automaticamente.
@@ -56,7 +65,7 @@ router.post('/', async (req, res) => {
 
       let { data: lead } = await supabase
         .from('leads')
-        .select('id, status_atual')
+        .select('id, status_atual, atendido_por')
         .eq('doctor_id', integration.doctor_id)
         .eq('telefone', telefoneNormalizado)
         .maybeSingle();
@@ -73,7 +82,7 @@ router.post('/', async (req, res) => {
             status_atual: 'lead',
             journey_type: 'low_ticket',
           })
-          .select('id, status_atual')
+          .select('id, status_atual, atendido_por')
           .single();
 
         if (!novoLead) continue;
@@ -95,6 +104,65 @@ router.post('/', async (req, res) => {
         await supabase.from('leads').update({ status_atual: 'conversa_iniciada' }).eq('id', lead.id);
         await supabase.from('deals').update({ etapa: 'conversa_iniciada' }).eq('lead_id', lead.id);
       }
+
+      // ---- Atendimento por IA ----
+      // Só entra em ação se o médico tiver ativado, e se a conversa ainda
+      // não tiver sido assumida por um closer humano (atendido_por='humano').
+      const iaDeveResponder = doctor?.ia_atendimento_ativo && lead.atendido_por !== 'humano';
+      if (!iaDeveResponder) continue;
+
+      const { data: historico } = await supabase
+        .from('conversations')
+        .select('direcao, conteudo')
+        .eq('lead_id', lead.id)
+        .order('timestamp_msg', { ascending: true })
+        .limit(30);
+
+      let resultado;
+      try {
+        resultado = await processarMensagemComIA({
+          contextoDoMedico: doctor.ia_contexto,
+          historico: historico || [],
+        });
+      } catch (err) {
+        console.error('Erro na IA de atendimento:', err);
+        continue; // não trava o webhook — a conversa fica visível pro closer normalmente
+      }
+
+      const accessToken = integration.access_token || process.env.META_SYSTEM_USER_TOKEN;
+      if (accessToken) {
+        try {
+          await sendWhatsAppMessage(integration.external_id, accessToken, telefoneNormalizado, resultado.resposta);
+          await supabase.from('conversations').insert({
+            lead_id: lead.id,
+            canal: 'whatsapp',
+            direcao: 'enviada',
+            conteudo: resultado.resposta,
+            origem: 'automatico',
+            timestamp_msg: new Date().toISOString(),
+          });
+        } catch (err) {
+          console.error('Erro ao enviar resposta da IA:', err);
+        }
+      }
+
+      // Handoff: lead quente vai pro closer com menos fila; lead frio ou
+      // qualificado demais pra IA sozinha também sai do controle dela.
+      if (resultado.status === 'quente') {
+        const closerId = await escolherCloserAutomatico(integration.doctor_id);
+        await supabase
+          .from('leads')
+          .update({
+            atendido_por: 'humano',
+            status_atual: 'reuniao_marcada',
+            ...(closerId ? { sdr_responsavel_id: closerId } : {}),
+          })
+          .eq('id', lead.id);
+        await supabase.from('deals').update({ etapa: 'reuniao_marcada' }).eq('lead_id', lead.id);
+      } else if (resultado.status === 'frio') {
+        await supabase.from('leads').update({ atendido_por: 'humano' }).eq('id', lead.id);
+      }
+      // status 'qualificando' — não muda nada, IA continua na próxima mensagem
     }
   } catch (err) {
     console.error('Erro processando webhook WhatsApp:', err);
