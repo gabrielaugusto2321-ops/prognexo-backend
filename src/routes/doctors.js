@@ -28,4 +28,28 @@ router.post('/', async (req, res) => {
   res.status(201).json(data);
 });
 
+// PATCH /doctors/:id/ia — liga/desliga o atendimento por IA e salva o
+// contexto (produto, tom de voz, critério de qualificação em texto livre)
+router.patch('/:id/ia', async (req, res) => {
+  const scopedIds = await getScopedDoctorIds(req.user);
+  if (scopedIds && !scopedIds.includes(req.params.id)) {
+    return res.status(403).json({ error: 'Sem acesso a este médico' });
+  }
+
+  const { ia_atendimento_ativo, ia_contexto } = req.body;
+  const campos = {};
+  if (ia_atendimento_ativo !== undefined) campos.ia_atendimento_ativo = ia_atendimento_ativo;
+  if (ia_contexto !== undefined) campos.ia_contexto = ia_contexto;
+
+  const { data, error } = await supabase
+    .from('doctors')
+    .update(campos)
+    .eq('id', req.params.id)
+    .select('id, ia_atendimento_ativo, ia_contexto')
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
 export default router;
