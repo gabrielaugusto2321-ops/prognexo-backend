@@ -48,7 +48,7 @@ router.post('/', async (req, res) => {
 
     const { data: doctor } = await supabase
       .from('doctors')
-      .select('ia_atendimento_ativo, ia_contexto')
+      .select('ia_atendimento_ativo, ia_contexto, ia_nome_agente, ia_palavras_proibidas, ia_score_minimo, ia_criterios')
       .eq('id', integration.doctor_id)
       .single();
 
@@ -118,15 +118,40 @@ router.post('/', async (req, res) => {
         .order('timestamp_msg', { ascending: true })
         .limit(30);
 
+      // Contexto de produto: se esse lead já tem um negócio (deal) ligado a
+      // um produto com contexto próprio de IA, usa ele além do contexto
+      // geral do médico — permite abordagem diferente por especialidade.
+      const { data: dealComProduto } = await supabase
+        .from('deals')
+        .select('products(ia_contexto)')
+        .eq('lead_id', lead.id)
+        .maybeSingle();
+
       let resultado;
       try {
         resultado = await processarMensagemComIA({
+          nomeAgente: doctor.ia_nome_agente,
           contextoDoMedico: doctor.ia_contexto,
+          contextoDoProduto: dealComProduto?.products?.ia_contexto || null,
+          palavrasProibidas: doctor.ia_palavras_proibidas,
+          criterios: doctor.ia_criterios,
+          scoreMinimo: doctor.ia_score_minimo,
           historico: historico || [],
         });
       } catch (err) {
         console.error('Erro na IA de atendimento:', err);
         continue; // não trava o webhook — a conversa fica visível pro closer normalmente
+      }
+
+      // Extração passiva: só preenche campos que ainda estão vazios, nunca
+      // sobrescreve um dado que o lead já tinha confirmado antes.
+      if (resultado.dados_extraidos) {
+        const { data: leadAtual } = await supabase.from('leads').select('dados_extraidos').eq('id', lead.id).single();
+        const dadosMesclados = { ...(leadAtual?.dados_extraidos || {}), ...resultado.dados_extraidos };
+        await supabase.from('leads').update({ dados_extraidos: dadosMesclados }).eq('id', lead.id);
+      }
+      if (resultado.score !== null) {
+        await supabase.from('leads').update({ ia_score: resultado.score }).eq('id', lead.id);
       }
 
       const accessToken = integration.access_token || process.env.META_SYSTEM_USER_TOKEN;
