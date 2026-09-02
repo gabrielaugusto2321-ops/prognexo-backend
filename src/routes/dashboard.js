@@ -11,7 +11,10 @@ router.get('/', async (req, res) => {
   const { doctor_id, periodo_dias = 30 } = req.query;
   const desde = new Date(Date.now() - periodo_dias * 86400000).toISOString();
 
-  let leadsQuery = supabase.from('leads').select('id, journey_type, status_atual, criado_em').gte('criado_em', desde);
+  let leadsQuery = supabase
+    .from('leads')
+    .select('id, journey_type, status_atual, criado_em, atendido_por, ia_sem_resposta_count, ia_motivo_handoff')
+    .gte('criado_em', desde);
   if (doctor_id) leadsQuery = leadsQuery.eq('doctor_id', doctor_id);
   else if (scopedIds) leadsQuery = leadsQuery.in('doctor_id', scopedIds);
 
@@ -21,6 +24,15 @@ router.get('/', async (req, res) => {
   const totalLeads = leads.length;
   const conversasIniciadas = leads.filter((l) => l.status_atual !== 'lead').length;
   const fechados = leads.filter((l) => l.status_atual === 'fechado').length;
+
+  // Métricas do atendimento por IA: quantos leads a IA pegou (qualquer um
+  // que não ficou só em "lead" bruto) e quantos ela precisou transferir.
+  const leadsTocadosPelaIa = leads.filter((l) => l.status_atual !== 'lead');
+  const leadsTransferidos = leads.filter((l) => l.atendido_por === 'humano' && l.ia_motivo_handoff);
+  const taxaTransferencia = leadsTocadosPelaIa.length
+    ? Math.round((leadsTransferidos.length / leadsTocadosPelaIa.length) * 100)
+    : 0;
+  const perguntasSemResposta = leads.reduce((soma, l) => soma + (l.ia_sem_resposta_count || 0), 0);
 
   let transQuery = supabase
     .from('transactions')
@@ -63,6 +75,8 @@ router.get('/', async (req, res) => {
     fechamentos: fechados,
     receita_gerada: receita,
     precisam_de_voce: precisamDeVoce,
+    ia_taxa_transferencia: taxaTransferencia,
+    ia_perguntas_sem_resposta: perguntasSemResposta,
   });
 });
 
