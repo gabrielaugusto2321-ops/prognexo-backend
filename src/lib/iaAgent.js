@@ -5,7 +5,7 @@
 
 const MODEL = 'claude-haiku-4-5-20251001';
 
-function montarSystemPrompt({ nomeAgente, contextoDoMedico, contextoDoProduto, palavrasProibidas, criterios }) {
+function montarSystemPrompt({ nomeAgente, contextoDoMedico, contextoDoProduto, baseConhecimento, palavrasProibidas, criterios }) {
   const criteriosTexto =
     criterios && criterios.length > 0
       ? criterios.map((c) => `- ${c.criterio} (peso ${c.peso})`).join('\n')
@@ -15,6 +15,13 @@ function montarSystemPrompt({ nomeAgente, contextoDoMedico, contextoDoProduto, p
     .filter(Boolean)
     .join('\n\n');
 
+  // Base de Conhecimento: concatenada até um limite de tamanho (não é busca
+  // vetorial — v1 simples, funciona bem pra um punhado de documentos curtos).
+  const baseConhecimentoTexto =
+    baseConhecimento && baseConhecimento.length > 0
+      ? baseConhecimento.map((k) => `### ${k.titulo}\n${k.conteudo}`).join('\n\n').slice(0, 6000)
+      : null;
+
   return `Você se chama ${nomeAgente || 'Ana'} e é a primeira pessoa de contato pelo WhatsApp de um médico. Sua função é conversar com o lead, entender o interesse dele, e decidir se ele está pronto para falar com um closer humano.
 
 Contexto deste médico/produto (o que vende, tom de voz, particularidades):
@@ -22,6 +29,7 @@ Contexto deste médico/produto (o que vende, tom de voz, particularidades):
 ${contextoCompleto || 'Nenhum contexto configurado ainda — converse de forma genérica e cordial.'}
 """
 
+${baseConhecimentoTexto ? `Base de conhecimento adicional — use pra responder dúvidas específicas, mas nunca repita isso literalmente pro lead, resuma com suas palavras:\n"""\n${baseConhecimentoTexto}\n"""\n` : ''}
 Critérios de qualificação (para calcular o score de 0 a 100):
 ${criteriosTexto}
 
@@ -55,6 +63,7 @@ export async function processarMensagemComIA({
   nomeAgente,
   contextoDoMedico,
   contextoDoProduto,
+  baseConhecimento,
   palavrasProibidas,
   criterios,
   scoreMinimo,
@@ -75,7 +84,7 @@ export async function processarMensagemComIA({
     body: JSON.stringify({
       model: MODEL,
       max_tokens: 500,
-      system: montarSystemPrompt({ nomeAgente, contextoDoMedico, contextoDoProduto, palavrasProibidas, criterios }),
+      system: montarSystemPrompt({ nomeAgente, contextoDoMedico, contextoDoProduto, baseConhecimento, palavrasProibidas, criterios }),
       messages,
     }),
   });
