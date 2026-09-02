@@ -30,20 +30,24 @@ ${palavrasProibidas ? `Nunca use estas palavras/termos, em nenhuma hipótese: ${
 Regras:
 - Responda como se fosse a equipe do médico, nunca diga que é uma IA a menos que perguntem diretamente — se perguntarem, seja honesta.
 - Mensagens curtas, como se estivesse digitando no WhatsApp de verdade — não escreva parágrafos longos.
-- Nunca invente informação sobre preço, produto ou disponibilidade que não esteja no contexto acima.
+- Responda SEMPRE no mesmo idioma que o lead está usando, mesmo que o contexto acima esteja em português.
+- Nunca invente informação sobre preço, produto ou disponibilidade que não esteja no contexto acima. Se não souber responder algo, admita que não sabe e siga a qualificação (pergunte o que falta saber) em vez de travar a conversa ou inventar.
 - Uma pergunta por vez — nunca dispare várias perguntas juntas.
 - Calcule um "score" de 0 a 100 a cada resposta, baseado em quanto da conversa já bate com os critérios acima.
+- Detecte o sentimento do lead. Se notar frustração, ansiedade forte, tristeza ou reclamação, marque "sentimento_negativo": true — isso força a transferência pra um humano mesmo com score baixo, porque paciente incomodado não deve ficar preso a um bot.
 - Extraia SOMENTE o que o lead disser espontaneamente para os campos abaixo — nunca pergunte por eles diretamente nem deduza. Sem informação clara, deixe o campo de fora do JSON.
-- Classifique como "quente" quando o score atingir o mínimo configurado OU quando o lead pedir claramente para falar com alguém/agendar. Classifique como "frio" se o lead recusar/desistir claramente. Caso contrário, "qualificando".
+- Classifique como "quente" quando o score atingir o mínimo configurado, quando o lead pedir claramente para falar com alguém/agendar, ou quando "sentimento_negativo" for true. Classifique como "frio" se o lead recusar/desistir claramente. Caso contrário, "qualificando".
 
 Responda SEMPRE em JSON puro, sem markdown, neste formato exato:
 {
   "resposta": "texto da mensagem a enviar pro lead",
   "status": "qualificando" | "quente" | "frio",
   "score": 0-100,
+  "sentimento_negativo": true | false,
+  "sem_resposta": true | false,
   "dados_extraidos": { "convenio": "...", "especialidade_interesse": "...", "urgencia": "..." }
 }
-Omita do "dados_extraidos" qualquer campo que o lead não tenha mencionado — não envie o campo com string vazia, simplesmente não o inclua.`;
+"sem_resposta" deve ser true quando o lead perguntou algo que o contexto fornecido não cobre, e você teve que admitir que não sabe. Omita do "dados_extraidos" qualquer campo que o lead não tenha mencionado — não envie o campo com string vazia, simplesmente não o inclua.`;
 }
 
 // historico: array de { direcao: 'recebida'|'enviada', conteudo: string }, mais antigo primeiro
@@ -85,23 +89,41 @@ export async function processarMensagemComIA({
   try {
     const parsed = JSON.parse(textoBruto);
     const score = typeof parsed.score === 'number' ? Math.max(0, Math.min(100, parsed.score)) : null;
+    const sentimentoNegativo = parsed.sentimento_negativo === true;
 
-    // Rede de segurança: mesmo que o modelo não tenha marcado "quente", se o
-    // score já bate o mínimo configurado, trata como quente de qualquer jeito.
     let status = ['qualificando', 'quente', 'frio'].includes(parsed.status) ? parsed.status : 'qualificando';
-    if (status !== 'frio' && score !== null && score >= (scoreMinimo ?? 70)) {
+    let motivoHandoff = null;
+
+    // Sentimento negativo escala na hora, independente de score — paciente
+    // incomodado não deve continuar preso a um bot.
+    if (sentimentoNegativo) {
       status = 'quente';
+      motivoHandoff = 'sentimento';
+    } else if (status !== 'frio' && score !== null && score >= (scoreMinimo ?? 70)) {
+      status = 'quente';
+      motivoHandoff = 'score';
+    } else if (status === 'quente') {
+      motivoHandoff = 'pedido_explicito';
     }
 
     return {
       resposta: parsed.resposta || 'Oi! Já te retorno.',
       status,
       score,
+      motivoHandoff,
+      semResposta: parsed.sem_resposta === true,
       dados_extraidos: parsed.dados_extraidos && typeof parsed.dados_extraidos === 'object' ? parsed.dados_extraidos : null,
     };
   } catch {
     // Se a IA não devolveu JSON válido por algum motivo, ainda manda a
     // resposta crua pro lead em vez de deixar a conversa muda.
-    return { resposta: textoBruto || 'Oi! Já te retorno.', status: 'qualificando', score: null, dados_extraidos: null };
+    return {
+      resposta: textoBruto || 'Oi! Já te retorno.',
+      status: 'qualificando',
+      score: null,
+      motivoHandoff: null,
+      semResposta: false,
+      dados_extraidos: null,
+    };
   }
 }
