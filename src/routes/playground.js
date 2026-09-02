@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { supabase } from '../lib/supabase.js';
 import { requireAuth, getScopedDoctorIds } from '../middleware/auth.js';
 import { processarMensagemComIA } from '../lib/iaAgent.js';
+import { buscarChunksRelevantes } from '../lib/knowledgeChunks.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -29,11 +30,18 @@ router.post('/simular', async (req, res) => {
 
   if (error || !doctor) return res.status(404).json({ error: 'Médico não encontrado' });
 
-  const { data: baseConhecimento } = await supabase
-    .from('knowledge_base')
-    .select('titulo, conteudo')
-    .eq('doctor_id', doctor_id)
-    .eq('ativo', true);
+  // Mesma busca vetorial usada no webhook real: embeda a última mensagem
+  // do lead no histórico simulado e traz só os trechos relevantes.
+  const ultimaDoLead = [...historico].reverse().find((h) => h.direcao === 'recebida');
+  let baseConhecimento = [];
+  try {
+    baseConhecimento = await buscarChunksRelevantes({
+      doctorId: doctor_id,
+      pergunta: ultimaDoLead?.conteudo || '',
+    });
+  } catch (err) {
+    console.error('Erro na busca da base de conhecimento (playground):', err);
+  }
 
   try {
     const resultado = await processarMensagemComIA({

@@ -15,8 +15,9 @@ function montarSystemPrompt({ nomeAgente, contextoDoMedico, contextoDoProduto, b
     .filter(Boolean)
     .join('\n\n');
 
-  // Base de Conhecimento: concatenada até um limite de tamanho (não é busca
-  // vetorial — v1 simples, funciona bem pra um punhado de documentos curtos).
+  // Base de Conhecimento: já chega aqui como os trechos mais relevantes
+  // pra pergunta do lead (busca vetorial feita a montante, em
+  // lib/knowledgeChunks.js). O slice é só uma trava de segurança.
   const baseConhecimentoTexto =
     baseConhecimento && baseConhecimento.length > 0
       ? baseConhecimento.map((k) => `### ${k.titulo}\n${k.conteudo}`).join('\n\n').slice(0, 6000)

@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "dev": "node --watch src/server.js",
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "backfill:embeddings": "node src/scripts/backfill-embeddings.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",

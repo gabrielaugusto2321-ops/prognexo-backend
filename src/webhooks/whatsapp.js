@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase.js';
 import { sendWhatsAppMessage } from '../lib/whatsapp.js';
 import { processarMensagemComIA } from '../lib/iaAgent.js';
 import { escolherCloserAutomatico } from '../lib/distribuicao.js';
+import { buscarChunksRelevantes } from '../lib/knowledgeChunks.js';
 
 const router = Router();
 
@@ -129,11 +130,19 @@ router.post('/', async (req, res) => {
         .eq('lead_id', lead.id)
         .maybeSingle();
 
-      const { data: baseConhecimento } = await supabase
-        .from('knowledge_base')
-        .select('titulo, conteudo')
-        .eq('doctor_id', integration.doctor_id)
-        .eq('ativo', true);
+      // Base de conhecimento: embeda a última mensagem do lead e busca só
+      // os trechos mais relevantes (busca vetorial), em vez de jogar todo
+      // o texto ativo no prompt. Se a busca falhar, segue sem contexto
+      // extra — não trava a resposta.
+      let baseConhecimento = [];
+      try {
+        baseConhecimento = await buscarChunksRelevantes({
+          doctorId: integration.doctor_id,
+          pergunta: conteudo,
+        });
+      } catch (err) {
+        console.error('Erro na busca da base de conhecimento:', err);
+      }
 
       let resultado;
       try {

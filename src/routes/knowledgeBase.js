@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { supabase } from '../lib/supabase.js';
 import { requireAuth, getScopedDoctorIds } from '../middleware/auth.js';
+import { reindexarKnowledgeBaseItem } from '../lib/knowledgeChunks.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -8,6 +9,19 @@ router.use(requireAuth);
 async function checarAcesso(req, doctorId) {
   const scopedIds = await getScopedDoctorIds(req.user);
   return !scopedIds || scopedIds.includes(doctorId);
+}
+
+// Gera os embeddings do item (ingestão inline). Se a Voyage falhar, o
+// item já foi salvo — devolve o erro num campo à parte em vez de derrubar
+// a request inteira, e o backfill/edição posterior refazem a indexação.
+async function reindexarComTolerancia(item) {
+  try {
+    await reindexarKnowledgeBaseItem(item);
+    return null;
+  } catch (err) {
+    console.error('Erro ao indexar item da base de conhecimento:', err);
+    return err.message;
+  }
 }
 
 // GET /knowledge-base?doctor_id=
@@ -41,7 +55,9 @@ router.post('/', async (req, res) => {
     .single();
 
   if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
+
+  const erroIndexacao = await reindexarComTolerancia(data);
+  res.json(erroIndexacao ? { ...data, erro_indexacao: erroIndexacao } : data);
 });
 
 // PATCH /knowledge-base/:id  { titulo?, conteudo?, ativo? }
@@ -58,6 +74,13 @@ router.patch('/:id', async (req, res) => {
 
   const { data, error } = await supabase.from('knowledge_base').update(campos).eq('id', req.params.id).select().single();
   if (error) return res.status(500).json({ error: error.message });
+
+  // Só refaz embeddings se o texto mudou; alternar "ativo" não precisa,
+  // porque a RPC de busca já filtra por knowledge_base.ativo.
+  if (titulo !== undefined || conteudo !== undefined) {
+    const erroIndexacao = await reindexarComTolerancia(data);
+    return res.json(erroIndexacao ? { ...data, erro_indexacao: erroIndexacao } : data);
+  }
   res.json(data);
 });
 
