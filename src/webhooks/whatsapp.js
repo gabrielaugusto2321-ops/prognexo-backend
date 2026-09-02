@@ -48,7 +48,9 @@ router.post('/', async (req, res) => {
 
     const { data: doctor } = await supabase
       .from('doctors')
-      .select('ia_atendimento_ativo, ia_contexto, ia_nome_agente, ia_palavras_proibidas, ia_score_minimo, ia_criterios')
+      .select(
+        'ia_atendimento_ativo, ia_contexto, ia_nome_agente, ia_palavras_proibidas, ia_score_minimo, ia_criterios, ia_limite_mensagens'
+      )
       .eq('id', integration.doctor_id)
       .single();
 
@@ -65,7 +67,7 @@ router.post('/', async (req, res) => {
 
       let { data: lead } = await supabase
         .from('leads')
-        .select('id, status_atual, atendido_por')
+        .select('id, status_atual, atendido_por, ia_mensagens_enviadas, ia_sem_resposta_count')
         .eq('doctor_id', integration.doctor_id)
         .eq('telefone', telefoneNormalizado)
         .maybeSingle();
@@ -82,7 +84,7 @@ router.post('/', async (req, res) => {
             status_atual: 'lead',
             journey_type: 'low_ticket',
           })
-          .select('id, status_atual, atendido_por')
+          .select('id, status_atual, atendido_por, ia_mensagens_enviadas, ia_sem_resposta_count')
           .single();
 
         if (!novoLead) continue;
@@ -143,16 +145,39 @@ router.post('/', async (req, res) => {
         continue; // não trava o webhook — a conversa fica visível pro closer normalmente
       }
 
+      // Trava de segurança: passou do limite de mensagens configurado sem
+      // resolver (nem quente, nem frio)? Força handoff — evita loop infinito
+      // com paciente ansioso, e evita custo de IA correndo solto.
+      const mensagensJaEnviadas = (lead.ia_mensagens_enviadas || 0) + 1;
+      const estourouLimite = mensagensJaEnviadas >= (doctor.ia_limite_mensagens || 20);
+      if (resultado.status === 'qualificando' && estourouLimite) {
+        resultado.status = 'quente';
+        resultado.motivoHandoff = 'limite_mensagens';
+      }
+
       // Extração passiva: só preenche campos que ainda estão vazios, nunca
       // sobrescreve um dado que o lead já tinha confirmado antes.
+      const camposParaAtualizar = {
+        ia_mensagens_enviadas: mensagensJaEnviadas,
+        ...(resultado.semResposta ? { ia_sem_resposta_count: (lead.ia_sem_resposta_count || 0) + 1 } : {}),
+        ...(resultado.score !== null ? { ia_score: resultado.score } : {}),
+      };
       if (resultado.dados_extraidos) {
         const { data: leadAtual } = await supabase.from('leads').select('dados_extraidos').eq('id', lead.id).single();
-        const dadosMesclados = { ...(leadAtual?.dados_extraidos || {}), ...resultado.dados_extraidos };
-        await supabase.from('leads').update({ dados_extraidos: dadosMesclados }).eq('id', lead.id);
+        camposParaAtualizar.dados_extraidos = { ...(leadAtual?.dados_extraidos || {}), ...resultado.dados_extraidos };
       }
-      if (resultado.score !== null) {
-        await supabase.from('leads').update({ ia_score: resultado.score }).eq('id', lead.id);
-      }
+      await supabase.from('leads').update(camposParaAtualizar).eq('id', lead.id);
+
+      // Proteção contra corrida: se um closer humano assumiu a conversa
+      // enquanto a IA processava essa mensagem, não manda a resposta da IA
+      // por cima — evita duas pessoas (bot e humano) respondendo juntas.
+      const { data: leadAgora } = await supabase.from('leads').select('atendido_por').eq('id', lead.id).single();
+      if (leadAgora?.atendido_por === 'humano') continue;
+
+      // Pausa curta simulando digitação humana — proporcional ao tamanho
+      // da resposta, com teto de 4s pra não atrasar demais quem está esperando.
+      const pausaMs = Math.min(4000, 600 + resultado.resposta.length * 20);
+      await new Promise((resolve) => setTimeout(resolve, pausaMs));
 
       const accessToken = integration.access_token || process.env.META_SYSTEM_USER_TOKEN;
       if (accessToken) {
@@ -180,6 +205,7 @@ router.post('/', async (req, res) => {
           .update({
             atendido_por: 'humano',
             status_atual: 'reuniao_marcada',
+            ia_motivo_handoff: resultado.motivoHandoff,
             ...(closerId ? { sdr_responsavel_id: closerId } : {}),
           })
           .eq('id', lead.id);
