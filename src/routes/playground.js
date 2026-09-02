@@ -29,11 +29,18 @@ router.post('/simular', async (req, res) => {
 
   if (error || !doctor) return res.status(404).json({ error: 'Médico não encontrado' });
 
+  const { data: baseConhecimento } = await supabase
+    .from('knowledge_base')
+    .select('titulo, conteudo')
+    .eq('doctor_id', doctor_id)
+    .eq('ativo', true);
+
   try {
     const resultado = await processarMensagemComIA({
       nomeAgente: doctor.ia_nome_agente,
       contextoDoMedico: doctor.ia_contexto,
       contextoDoProduto: req.body.contexto_produto || null,
+      baseConhecimento: baseConhecimento || [],
       palavrasProibidas: doctor.ia_palavras_proibidas,
       criterios: doctor.ia_criterios,
       scoreMinimo: doctor.ia_score_minimo,
