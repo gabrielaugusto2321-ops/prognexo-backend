@@ -31,6 +31,30 @@ router.get('/', async (req, res) => {
   const { data: transacoes } = await transQuery;
   const receita = (transacoes || []).reduce((sum, t) => sum + Number(t.valor), 0);
 
+  // "Precisam de você": leads que a IA já entregou pro time humano, mas
+  // que ainda não tiveram nenhuma resposta manual de um closer — ou seja,
+  // handoff pendente de verdade, não só "atribuído".
+  let precisamDeVoceQuery = supabase.from('leads').select('id, doctor_id').eq('atendido_por', 'humano').gte('criado_em', desde);
+  if (doctor_id) precisamDeVoceQuery = precisamDeVoceQuery.eq('doctor_id', doctor_id);
+  else if (scopedIds) precisamDeVoceQuery = precisamDeVoceQuery.in('doctor_id', scopedIds);
+  const { data: leadsHumano } = await precisamDeVoceQuery;
+
+  let precisamDeVoce = 0;
+  if (leadsHumano && leadsHumano.length > 0) {
+    const leadIds = leadsHumano.map((l) => l.id);
+    const { data: ultimasMensagens } = await supabase
+      .from('conversations')
+      .select('lead_id, direcao, origem, timestamp_msg')
+      .in('lead_id', leadIds)
+      .order('timestamp_msg', { ascending: false });
+
+    const ultimaPorLead = {};
+    for (const m of ultimasMensagens || []) {
+      if (!ultimaPorLead[m.lead_id]) ultimaPorLead[m.lead_id] = m;
+    }
+    precisamDeVoce = Object.values(ultimaPorLead).filter((m) => !(m.direcao === 'enviada' && m.origem === 'manual')).length;
+  }
+
   res.json({
     periodo_dias: Number(periodo_dias),
     total_leads: totalLeads,
@@ -38,6 +62,7 @@ router.get('/', async (req, res) => {
     taxa_resposta: totalLeads ? Math.round((conversasIniciadas / totalLeads) * 100) : 0,
     fechamentos: fechados,
     receita_gerada: receita,
+    precisam_de_voce: precisamDeVoce,
   });
 });
 
