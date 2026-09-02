@@ -129,12 +129,19 @@ router.post('/', async (req, res) => {
         .eq('lead_id', lead.id)
         .maybeSingle();
 
+      const { data: baseConhecimento } = await supabase
+        .from('knowledge_base')
+        .select('titulo, conteudo')
+        .eq('doctor_id', integration.doctor_id)
+        .eq('ativo', true);
+
       let resultado;
       try {
         resultado = await processarMensagemComIA({
           nomeAgente: doctor.ia_nome_agente,
           contextoDoMedico: doctor.ia_contexto,
           contextoDoProduto: dealComProduto?.products?.ia_contexto || null,
+          baseConhecimento: baseConhecimento || [],
           palavrasProibidas: doctor.ia_palavras_proibidas,
           criterios: doctor.ia_criterios,
           scoreMinimo: doctor.ia_score_minimo,
