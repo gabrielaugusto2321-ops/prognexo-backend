@@ -36,7 +36,7 @@ router.patch('/:id/ia', async (req, res) => {
     return res.status(403).json({ error: 'Sem acesso a este médico' });
   }
 
-  const { ia_atendimento_ativo, ia_contexto, ia_nome_agente, ia_palavras_proibidas, ia_score_minimo, ia_criterios } = req.body;
+  const { ia_atendimento_ativo, ia_contexto, ia_nome_agente, ia_palavras_proibidas, ia_score_minimo, ia_criterios, ia_limite_mensagens } = req.body;
   const campos = {};
   if (ia_atendimento_ativo !== undefined) campos.ia_atendimento_ativo = ia_atendimento_ativo;
   if (ia_contexto !== undefined) campos.ia_contexto = ia_contexto;
@@ -44,12 +44,13 @@ router.patch('/:id/ia', async (req, res) => {
   if (ia_palavras_proibidas !== undefined) campos.ia_palavras_proibidas = ia_palavras_proibidas;
   if (ia_score_minimo !== undefined) campos.ia_score_minimo = ia_score_minimo;
   if (ia_criterios !== undefined) campos.ia_criterios = ia_criterios;
+  if (ia_limite_mensagens !== undefined) campos.ia_limite_mensagens = ia_limite_mensagens;
 
   const { data, error } = await supabase
     .from('doctors')
     .update(campos)
     .eq('id', req.params.id)
-    .select('id, ia_atendimento_ativo, ia_contexto, ia_nome_agente, ia_palavras_proibidas, ia_score_minimo, ia_criterios')
+    .select('id, ia_atendimento_ativo, ia_contexto, ia_nome_agente, ia_palavras_proibidas, ia_score_minimo, ia_criterios, ia_limite_mensagens')
     .single();
 
   if (error) return res.status(500).json({ error: error.message });
