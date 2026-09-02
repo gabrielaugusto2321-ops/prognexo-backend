@@ -37,7 +37,7 @@ router.get('/', async (req, res) => {
   let query = supabase
     .from('conversations')
     .select(
-      '*, leads!inner(id, nome, doctor_id, sdr_responsavel_id, doctors(nome), deals(products(nome)), sdr:users!leads_sdr_responsavel_id_fkey(nome))'
+      '*, leads!inner(id, nome, doctor_id, sdr_responsavel_id, atendido_por, ia_score, doctors(nome), deals(products(nome)), sdr:users!leads_sdr_responsavel_id_fkey(nome))'
     )
     .order('timestamp_msg', { ascending: false })
     .limit(300);
@@ -64,6 +64,8 @@ router.get('/', async (req, res) => {
         lead: lead.nome,
         doctor: lead.doctors?.nome ?? '',
         produto: lead.deals?.[0]?.products?.nome ?? '',
+        atendido_por: lead.atendido_por || null,
+        ia_score: lead.ia_score ?? null,
         mensagens: [],
       });
     }
