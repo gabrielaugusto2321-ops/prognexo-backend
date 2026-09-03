@@ -27,7 +27,7 @@ router.get('/', async (req, res) => {
     .eq('doctor_id', doctor_id)
     .maybeSingle();
 
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
   res.json(data);
 });
 
@@ -47,7 +47,7 @@ router.post('/', async (req, res) => {
     .select()
     .single();
 
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
   res.json(data);
 });
 
@@ -64,7 +64,7 @@ router.patch('/:id', async (req, res) => {
   if (ativo !== undefined) campos.ativo = ativo;
 
   const { data, error } = await supabase.from('ia_agentes_bdr').update(campos).eq('id', req.params.id).select().single();
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
   res.json(data);
 });
 
@@ -75,7 +75,7 @@ router.delete('/:id', async (req, res) => {
   if (!(await checarAcesso(req, item.doctor_id))) return res.status(403).json({ error: 'Sem acesso' });
 
   const { error } = await supabase.from('ia_agentes_bdr').delete().eq('id', req.params.id);
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
   res.json({ ok: true });
 });
 
@@ -103,7 +103,8 @@ router.post('/:id/gerar-mensagem', async (req, res) => {
     });
     res.json({ variacoes });
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    req.log?.error({ err }, 'BDR message generation failed');
+    res.status(502).json({ error: 'ai_generation_failed', requestId: req.id });
   }
 });
 

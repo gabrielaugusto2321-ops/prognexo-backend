@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { supabase } from '../lib/supabase.js';
 import { requireAuth, getScopedDoctorIds } from '../middleware/auth.js';
 import { reindexarKnowledgeBaseItem } from '../lib/knowledgeChunks.js';
+import { logger } from '../lib/logger.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -19,8 +20,8 @@ async function reindexarComTolerancia(item) {
     await reindexarKnowledgeBaseItem(item);
     return null;
   } catch (err) {
-    console.error('Erro ao indexar item da base de conhecimento:', err);
-    return err.message;
+    logger.error({ err }, 'Knowledge base indexing failed');
+    return 'indexing_failed';
   }
 }
 
@@ -36,7 +37,7 @@ router.get('/', async (req, res) => {
     .eq('doctor_id', doctor_id)
     .order('criado_em', { ascending: false });
 
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
   res.json(data);
 });
 
@@ -54,7 +55,7 @@ router.post('/', async (req, res) => {
     .select()
     .single();
 
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
 
   const erroIndexacao = await reindexarComTolerancia(data);
   res.json(erroIndexacao ? { ...data, erro_indexacao: erroIndexacao } : data);
@@ -73,7 +74,7 @@ router.patch('/:id', async (req, res) => {
   if (ativo !== undefined) campos.ativo = ativo;
 
   const { data, error } = await supabase.from('knowledge_base').update(campos).eq('id', req.params.id).select().single();
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
 
   // Só refaz embeddings se o texto mudou; alternar "ativo" não precisa,
   // porque a RPC de busca já filtra por knowledge_base.ativo.
@@ -91,7 +92,7 @@ router.delete('/:id', async (req, res) => {
   if (!(await checarAcesso(req, item.doctor_id))) return res.status(403).json({ error: 'Sem acesso' });
 
   const { error } = await supabase.from('knowledge_base').delete().eq('id', req.params.id);
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
   res.json({ ok: true });
 });
 

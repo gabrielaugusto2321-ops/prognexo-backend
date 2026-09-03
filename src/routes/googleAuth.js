@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { supabase } from '../lib/supabase.js';
 import { requireAuth } from '../middleware/auth.js';
 import { buildAuthUrl, trocarCodigoPorTokens, estaConectado } from '../lib/googleCalendar.js';
+import { logger } from '../lib/logger.js';
 
 const router = Router();
 
@@ -32,7 +33,7 @@ router.get('/callback', async (req, res) => {
 
     res.redirect(`${FRONTEND_URL}/#/agenda?google=conectado`);
   } catch (err) {
-    console.error('Erro no callback do Google:', err);
+    logger.error({ err }, 'Google OAuth callback failed');
     res.redirect(`${FRONTEND_URL}/#/agenda?google=erro`);
   }
 });

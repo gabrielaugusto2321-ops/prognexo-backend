@@ -3,6 +3,8 @@
 // livre + critérios com peso — sem regra fixa de qualificação embutida em
 // código: cada médico define isso na tela de Integrações.
 
+import { AI_LIMITS } from './aiLimits.js';
+
 const MODEL = 'claude-haiku-4-5-20251001';
 
 function montarSystemPrompt({ nomeAgente, contextoDoMedico, contextoDoProduto, baseConhecimento, palavrasProibidas, criterios }) {
@@ -70,25 +72,36 @@ export async function processarMensagemComIA({
   scoreMinimo,
   historico,
 }) {
-  const messages = historico.map((h) => ({
+  // Hard caps (mesma trava do playground) — protege contra histórico gigante
+  // mesmo quando a chamada vem do webhook.
+  const historicoLimitado = (historico || []).slice(-AI_LIMITS.MAX_HISTORY_MESSAGES);
+  const messages = historicoLimitado.map((h) => ({
     role: h.direcao === 'recebida' ? 'user' : 'assistant',
-    content: h.conteudo,
+    content: String(h.conteudo ?? '').slice(0, AI_LIMITS.MAX_MESSAGE_CHARS),
   }));
 
-  const resp = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'x-api-key': process.env.ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      max_tokens: 500,
-      system: montarSystemPrompt({ nomeAgente, contextoDoMedico, contextoDoProduto, baseConhecimento, palavrasProibidas, criterios }),
-      messages,
-    }),
-  });
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), AI_LIMITS.CALL_TIMEOUT_MS);
+  let resp;
+  try {
+    resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      signal: abort.signal,
+      headers: {
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        max_tokens: AI_LIMITS.MAX_TOKENS,
+        system: montarSystemPrompt({ nomeAgente, contextoDoMedico, contextoDoProduto, baseConhecimento, palavrasProibidas, criterios }),
+        messages,
+      }),
+    });
+  } finally {
+    clearTimeout(timer);
+  }
 
   const data = await resp.json();
   if (!resp.ok) {

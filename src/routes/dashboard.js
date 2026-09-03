@@ -19,7 +19,7 @@ router.get('/', async (req, res) => {
   else if (scopedIds) leadsQuery = leadsQuery.in('doctor_id', scopedIds);
 
   const { data: leads, error } = await leadsQuery;
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
 
   const totalLeads = leads.length;
   const conversasIniciadas = leads.filter((l) => l.status_atual !== 'lead').length;

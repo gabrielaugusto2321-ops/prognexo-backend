@@ -1,117 +1,188 @@
 import { Router } from 'express';
+import { z } from 'zod';
 import { supabase } from '../lib/supabase.js';
 import { requireAuth, getScopedDoctorIds, isScopedToOwnLeadsOnly } from '../middleware/auth.js';
+import { authorizeResource, assertRelatedBelongs, assertUserAccess } from '../lib/authz.js';
 import { escolherCloserAutomatico } from '../lib/distribuicao.js';
 
 const router = Router();
 router.use(requireAuth);
 
+// O cliente nunca envia req.body cru. O tenant (doctor_id) ainda vem no body
+// por compatibilidade com o modelo atual, mas é sempre validado contra
+// getScopedDoctorIds — nunca é fonte de autoridade.
+const createSchema = z
+  .object({
+    doctor_id: z.string().uuid(),
+    nome: z.string().trim().min(1).max(160),
+    telefone: z.string().max(30).optional(),
+    email: z.string().email().optional(),
+    journey_type: z.enum(['low_ticket', 'high_ticket']).optional(),
+    status_atual: z.string().max(50).optional(),
+    product_id: z.string().uuid().nullable().optional(),
+    sdr_responsavel_id: z.string().uuid().nullable().optional(),
+    dados_extraidos: z.record(z.unknown()).optional(),
+  })
+  .strict();
+
+const updateSchema = z
+  .object({
+    status_atual: z.string().max(50).optional(),
+    dados_extraidos: z.record(z.unknown()).optional(),
+    nome: z.string().trim().min(1).max(160).optional(),
+    telefone: z.string().max(30).optional(),
+    email: z.string().email().nullable().optional(),
+    journey_type: z.enum(['low_ticket', 'high_ticket']).optional(),
+    sdr_responsavel_id: z.string().uuid().nullable().optional(),
+    atendido_por: z.enum(['humano', 'ia']).optional(),
+  })
+  .strict();
+
 // GET /leads?doctor_id=&journey_type=&status=
-router.get('/', async (req, res) => {
-  const scopedIds = await getScopedDoctorIds(req.user);
-  const { doctor_id, journey_type, status } = req.query;
+router.get('/', async (req, res, next) => {
+  try {
+    const scopedIds = await getScopedDoctorIds(req.user);
+    const { doctor_id, journey_type, status } = req.query;
 
-  let query = supabase.from('leads').select('*').order('criado_em', { ascending: false });
+    let query = supabase.from('leads').select('*').order('criado_em', { ascending: false });
 
-  if (scopedIds) query = query.in('doctor_id', scopedIds);
-  if (doctor_id) query = query.eq('doctor_id', doctor_id);
-  if (journey_type) query = query.eq('journey_type', journey_type);
-  if (status) query = query.eq('status_atual', status);
+    if (scopedIds) query = query.in('doctor_id', scopedIds);
+    if (doctor_id) query = query.eq('doctor_id', doctor_id);
+    if (journey_type) query = query.eq('journey_type', journey_type);
+    if (status) query = query.eq('status_atual', status);
 
-  // Closer só vê a própria carteira — não o funil inteiro do médico
-  if (isScopedToOwnLeadsOnly(req.user)) {
-    query = query.eq('sdr_responsavel_id', req.user.id);
-  }
-
-  const { data: leads, error } = await query;
-  if (error) return res.status(500).json({ error: error.message });
-
-  // Calcula há quanto tempo cada lead está sem interação, pra sinalizar
-  // "esfriando" sem precisar de nenhum job separado — é só matemática em cima
-  // da última conversa registrada (ou da criação do lead, se nunca respondeu).
-  const leadIds = leads.map((l) => l.id);
-  let ultimaInteracaoPorLead = {};
-
-  if (leadIds.length > 0) {
-    const { data: conversas } = await supabase
-      .from('conversations')
-      .select('lead_id, timestamp_msg')
-      .in('lead_id', leadIds)
-      .order('timestamp_msg', { ascending: false });
-
-    for (const c of conversas || []) {
-      if (!ultimaInteracaoPorLead[c.lead_id]) ultimaInteracaoPorLead[c.lead_id] = c.timestamp_msg;
+    // Closer só vê a própria carteira — não o funil inteiro do médico
+    if (isScopedToOwnLeadsOnly(req.user)) {
+      query = query.eq('sdr_responsavel_id', req.user.id);
     }
+
+    const { data: leads, error } = await query;
+    if (error) throw error;
+
+    // Calcula há quanto tempo cada lead está sem interação, pra sinalizar
+    // "esfriando" sem precisar de nenhum job separado — é só matemática em cima
+    // da última conversa registrada (ou da criação do lead, se nunca respondeu).
+    const leadIds = (leads || []).map((l) => l.id);
+    const ultimaInteracaoPorLead = {};
+
+    if (leadIds.length > 0) {
+      const { data: conversas } = await supabase
+        .from('conversations')
+        .select('lead_id, timestamp_msg')
+        .in('lead_id', leadIds)
+        .order('timestamp_msg', { ascending: false });
+
+      for (const c of conversas || []) {
+        if (!ultimaInteracaoPorLead[c.lead_id]) ultimaInteracaoPorLead[c.lead_id] = c.timestamp_msg;
+      }
+    }
+
+    const agora = Date.now();
+    const enriquecidos = (leads || []).map((lead) => {
+      const referencia = ultimaInteracaoPorLead[lead.id] ?? lead.criado_em;
+      const horasSemInteracao = Math.round((agora - new Date(referencia).getTime()) / 3600000);
+      const etapaAberta = ['lead', 'conversa_iniciada'].includes(lead.status_atual);
+      return {
+        ...lead,
+        horas_sem_interacao: horasSemInteracao,
+        esfriando: etapaAberta && horasSemInteracao >= 4,
+      };
+    });
+
+    res.json(enriquecidos);
+  } catch (e) {
+    next(e);
   }
-
-  const agora = Date.now();
-  const enriquecidos = leads.map((lead) => {
-    const referencia = ultimaInteracaoPorLead[lead.id] ?? lead.criado_em;
-    const horasSemInteracao = Math.round((agora - new Date(referencia).getTime()) / 3600000);
-    const etapaAberta = ['lead', 'conversa_iniciada'].includes(lead.status_atual);
-    return {
-      ...lead,
-      horas_sem_interacao: horasSemInteracao,
-      esfriando: etapaAberta && horasSemInteracao >= 4,
-    };
-  });
-
-  res.json(enriquecidos);
 });
 
 // POST /leads — criação manual ou via integração externa (quiz, formulário)
-router.post('/', async (req, res) => {
-  const scopedIds = await getScopedDoctorIds(req.user);
-  const payload = req.body;
+router.post('/', async (req, res, next) => {
+  try {
+    const parsed = createSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: 'invalid_payload' });
+    const body = parsed.data;
 
-  if (scopedIds && !scopedIds.includes(payload.doctor_id)) {
-    return res.status(403).json({ error: 'Sem acesso a este médico' });
+    const scopedIds = await getScopedDoctorIds(req.user);
+    if (scopedIds && !scopedIds.includes(body.doctor_id)) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+
+    // Todo id relacionado é fronteira de tenant: o produto tem que ser do mesmo médico.
+    if (body.product_id) {
+      const rel = await assertRelatedBelongs({ table: 'products', id: body.product_id, doctorId: body.doctor_id });
+      if (!rel.ok) return res.status(403).json({ error: 'related_resource_forbidden' });
+    }
+
+    // Responsável: closer só pode atribuir a si mesmo; doctor/admin a qualquer
+    // usuário com acesso ao médico. Sem responsável, cai na distribuição automática.
+    let owner = body.sdr_responsavel_id ?? null;
+    if (req.user.role === 'closer') {
+      if (owner && owner !== req.user.id) return res.status(403).json({ error: 'forbidden' });
+      owner = req.user.id;
+    } else if (owner && !(await assertUserAccess({ userId: owner, doctorId: body.doctor_id }))) {
+      return res.status(403).json({ error: 'related_resource_forbidden' });
+    }
+    if (!owner) owner = await escolherCloserAutomatico(body.doctor_id);
+
+    const { data, error } = await supabase
+      .from('leads')
+      .insert({ ...body, sdr_responsavel_id: owner || null })
+      .select()
+      .single();
+    if (error) throw error;
+
+    // Cria automaticamente o deal correspondente na etapa "lead"
+    const dealResult = await supabase.from('deals').insert({
+      lead_id: data.id,
+      product_id: body.product_id ?? null,
+      etapa: 'lead',
+      sdr_responsavel_id: owner || null,
+    });
+    if (dealResult.error) throw dealResult.error;
+
+    res.status(201).json(data);
+  } catch (e) {
+    next(e);
   }
-
-  // Distribuição automática: se o médico tiver essa opção ligada e ninguém
-  // foi escolhido manualmente, atribui pro closer que tem MENOS leads ativos
-  // no momento — se autoequilibra sozinho, sem precisar de fila fixa.
-  if (!payload.sdr_responsavel_id) {
-    payload.sdr_responsavel_id = await escolherCloserAutomatico(payload.doctor_id);
-  }
-
-  const { data, error } = await supabase
-    .from('leads')
-    .insert(payload)
-    .select()
-    .single();
-
-  if (error) return res.status(500).json({ error: error.message });
-
-  // Cria automaticamente o deal correspondente na etapa "lead"
-  await supabase.from('deals').insert({
-    lead_id: data.id,
-    product_id: payload.product_id ?? null,
-    etapa: 'lead',
-    sdr_responsavel_id: payload.sdr_responsavel_id ?? null,
-  });
-
-  res.status(201).json(data);
 });
 
 // PATCH /leads/:id — atualizar status manualmente, ou reatribuir o closer responsável
-router.patch('/:id', async (req, res) => {
-  const { id } = req.params;
+router.patch('/:id', async (req, res, next) => {
+  try {
+    // Resolve o lead no servidor e confirma o acesso do usuário — nunca confia no :id sozinho.
+    const auth = await authorizeResource({
+      user: req.user,
+      table: 'leads',
+      id: req.params.id,
+      requireOwnerForCloser: true,
+    });
+    if (!auth.ok) return res.status(auth.reason === 'not_found' ? 404 : 403).json({ error: auth.reason });
 
-  // Closer não pode reatribuir leads pra si mesmo nem tirar de outro — só doctor/admin fazem isso
-  if (isScopedToOwnLeadsOnly(req.user) && 'sdr_responsavel_id' in req.body) {
-    return res.status(403).json({ error: 'Somente o médico ou admin pode reatribuir responsável' });
+    const parsed = updateSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: 'invalid_payload' });
+
+    // Closer não pode reatribuir responsável
+    if (req.user.role === 'closer' && 'sdr_responsavel_id' in parsed.data) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+    if (
+      parsed.data.sdr_responsavel_id &&
+      !(await assertUserAccess({ userId: parsed.data.sdr_responsavel_id, doctorId: auth.row.doctor_id }))
+    ) {
+      return res.status(403).json({ error: 'related_resource_forbidden' });
+    }
+
+    const { data, error } = await supabase
+      .from('leads')
+      .update(parsed.data)
+      .eq('id', req.params.id)
+      .select()
+      .single();
+    if (error) throw error;
+    res.json(data);
+  } catch (e) {
+    next(e);
   }
-
-  const { data, error } = await supabase
-    .from('leads')
-    .update(req.body)
-    .eq('id', id)
-    .select()
-    .single();
-
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
 });
 
 export default router;

@@ -13,7 +13,7 @@ router.get('/', async (req, res) => {
   if (scopedIds) query = query.in('id', scopedIds);
 
   const { data, error } = await query;
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
   res.json(data);
 });
 
@@ -23,8 +23,10 @@ router.post('/', async (req, res) => {
     return res.status(403).json({ error: 'Só admin pode cadastrar médicos' });
   }
 
-  const { data, error } = await supabase.from('doctors').insert(req.body).select().single();
-  if (error) return res.status(500).json({ error: error.message });
+  const { nome, especialidade, telefone, email, owner_user_id } = req.body;
+  if (!nome || !owner_user_id) return res.status(400).json({ error: 'invalid_payload' });
+  const { data, error } = await supabase.from('doctors').insert({ nome, especialidade, telefone, email, owner_user_id, plano: 'gratuito', status: 'pendente' }).select().single();
+  if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
   res.status(201).json(data);
 });
 
@@ -53,7 +55,7 @@ router.patch('/:id/ia', async (req, res) => {
     .select('id, ia_atendimento_ativo, ia_contexto, ia_nome_agente, ia_palavras_proibidas, ia_score_minimo, ia_criterios, ia_limite_mensagens')
     .single();
 
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
   res.json(data);
 });
 
@@ -100,7 +102,8 @@ Escreva em português, direto, entre 3 e 6 frases — sem markdown, sem título,
     const contextoGerado = data?.content?.[0]?.text?.trim() || '';
     res.json({ ia_contexto: contextoGerado });
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    req.log?.error({ err }, 'IA context generation failed');
+    res.status(502).json({ error: 'ai_generation_failed', requestId: req.id });
   }
 });
 

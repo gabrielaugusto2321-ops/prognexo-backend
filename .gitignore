@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+
+# Ambiente — nunca versionar segredos; manter só o exemplo
+.env
+.env.*
+!.env.example
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+logs/
+*.log
+
+# Testes / cobertura
+coverage/
+.nyc_output/
+test-results/
+*.tap
+junit.xml
+vitest-report.json
+
+# Build / artefatos
+dist/
+build/
+*.tsbuildinfo
+
+# Temporários
+tmp/
+temp/
+*.tmp
+*.bak
+.cache/
+
+# Editores / SO
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.suo
+*.sw?

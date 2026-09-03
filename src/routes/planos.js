@@ -3,6 +3,8 @@ import crypto from 'crypto';
 import { supabase } from '../lib/supabase.js';
 import { criarClienteAsaas, criarAssinaturaCartao } from '../lib/asaas.js';
 import { enviarEmail, emailBoasVindasHtml } from '../lib/resend.js';
+import { z } from 'zod';
+import { env } from '../config/env.js';
 
 const router = Router();
 
@@ -10,6 +12,7 @@ const PRECOS = {
   vendas: { mensal: 197, trimestral: 167, semestral: 147, anual: 117 },
   combo: { mensal: 247, trimestral: 247, semestral: 247, anual: 247 },
 };
+const checkoutSchema=z.object({nome:z.string().min(2).max(120),clinica:z.string().max(120).optional(),email:z.string().email(),telefone:z.string().min(8).max(30),cpfCnpj:z.string().regex(/^\d{11}|\d{14}$/),cep:z.string().regex(/^\d{8}$/),numeroEndereco:z.string().min(1).max(20),modulo:z.enum(['vendas','combo']),periodicidade:z.enum(['mensal','trimestral','semestral','anual']),cartao:z.object({nomeTitular:z.string().min(2).max(120),numero:z.string().regex(/^\d{13,19}$/),mesValidade:z.string().regex(/^(0[1-9]|1[0-2])$/),anoValidade:z.string().regex(/^\d{4}$/),ccv:z.string().regex(/^\d{3,4}$/)}).strict()}).strict();
 
 const LOGIN_URL = process.env.FRONTEND_URL
   ? `${process.env.FRONTEND_URL}/#/login`
@@ -27,6 +30,8 @@ function gerarSenhaTemporaria() {
 //   cartao: { nomeTitular, numero, mesValidade, anoValidade, ccv }
 // }
 router.post('/assinar', async (req, res) => {
+  if (env.NODE_ENV === 'production' && env.LEGACY_CARD_CHECKOUT_ENABLED !== 'true') return res.status(503).json({ error: 'checkout_indisponivel' });
+  const parsed=checkoutSchema.safeParse(req.body);if(!parsed.success)return res.status(400).json({error:'invalid_checkout_data'});
   const {
     nome,
     clinica,
@@ -38,7 +43,7 @@ router.post('/assinar', async (req, res) => {
     modulo,
     periodicidade,
     cartao,
-  } = req.body;
+  } = parsed.data;
 
   if (!nome || !email || !cpfCnpj || !modulo || !periodicidade || !cartao) {
     return res.status(400).json({ error: 'Dados incompletos' });
@@ -76,7 +81,8 @@ router.post('/assinar', async (req, res) => {
       remoteIp: req.ip,
     });
   } catch (err) {
-    return res.status(402).json({ error: err.message || 'Pagamento recusado' });
+    req.log?.error({ err }, 'Asaas subscription failed');
+    return res.status(402).json({ error: 'pagamento_recusado', requestId: req.id });
   }
 
   // 2. Pagamento aprovado — cria a conta de acesso com senha gerada
@@ -87,7 +93,8 @@ router.post('/assinar', async (req, res) => {
     email_confirm: true,
   });
   if (authError) {
-    return res.status(500).json({ error: `Pagamento aprovado, mas falha ao criar conta: ${authError.message}` });
+    req.log?.error({ err: authError }, 'Checkout: auth user creation failed after payment');
+    return res.status(500).json({ error: 'provisionamento_falhou', requestId: req.id });
   }
 
   const { error: userError } = await supabase.from('users').insert({
@@ -97,7 +104,8 @@ router.post('/assinar', async (req, res) => {
     role: 'doctor',
   });
   if (userError) {
-    return res.status(500).json({ error: `Pagamento aprovado, mas falha ao criar usuário: ${userError.message}` });
+    req.log?.error({ err: userError }, 'Checkout: user row creation failed after payment');
+    return res.status(500).json({ error: 'provisionamento_falhou', requestId: req.id });
   }
 
   const { error: doctorError } = await supabase.from('doctors').insert({
@@ -112,7 +120,8 @@ router.post('/assinar', async (req, res) => {
     assinatura_status: 'ativa',
   });
   if (doctorError) {
-    return res.status(500).json({ error: `Pagamento aprovado, mas falha ao criar médico: ${doctorError.message}` });
+    req.log?.error({ err: doctorError }, 'Checkout: doctor row creation failed after payment');
+    return res.status(500).json({ error: 'provisionamento_falhou', requestId: req.id });
   }
 
   // 3. Manda a senha por e-mail. Se o e-mail falhar, não desfaz o cadastro —
@@ -125,7 +134,7 @@ router.post('/assinar', async (req, res) => {
       html: emailBoasVindasHtml({ nome, email, senha, loginUrl: LOGIN_URL }),
     });
   } catch (err) {
-    console.error('[planos/assinar] Falha ao enviar e-mail via Resend:', err.message);
+    req.log?.error({ err }, 'Checkout: welcome email failed');
     emailEnviado = false;
   }
 

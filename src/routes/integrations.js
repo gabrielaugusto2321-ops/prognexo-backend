@@ -10,7 +10,7 @@ const GATEWAYS = ['kiwify', 'hotmart', 'ticto', 'pagarme', 'whatsapp'];
 
 async function resolveDoctorId(user, queryDoctorId) {
   if (user.role === 'doctor') {
-    const { data } = await supabase.from('doctors').select('id').eq('owner_user_id', user.id).single();
+    const { data } = await supabase.from('doctors').select('id').eq('owner_user_id', user.id).maybeSingle();
     return data?.id ?? null;
   }
   // Só admin pode consultar/editar integrações de outro médico via query param
@@ -32,11 +32,12 @@ router.get('/', async (req, res) => {
   }
 
   const { data, error } = await supabase.from('integrations').select('*').eq('doctor_id', doctorId);
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
 
-  const semSegredo = data.map(({ access_token, ...resto }) => ({
+  const semSegredo = data.map(({ access_token, webhook_token, ...resto }) => ({
     ...resto,
     access_token_configurado: Boolean(access_token),
+    webhook_token_configurado: Boolean(webhook_token),
   }));
 
   res.json(semSegredo);
@@ -65,7 +66,7 @@ router.patch('/whatsapp', async (req, res) => {
     .select('doctor_id, gateway, external_id')
     .single();
 
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
   res.json({ ...data, access_token_configurado: Boolean(access_token) });
 });
 
@@ -92,7 +93,8 @@ router.post('/whatsapp/embedded-callback', async (req, res) => {
     await registerPhoneNumber(phone_number_id);
     await subscribeAppToWaba(waba_id);
   } catch (err) {
-    return res.status(502).json({ error: err.message });
+    req.log?.error({ err }, 'WhatsApp embedded signup failed');
+    return res.status(502).json({ error: 'embedded_signup_failed', requestId: req.id });
   }
 
   const { data, error } = await supabase
@@ -103,7 +105,7 @@ router.post('/whatsapp/embedded-callback', async (req, res) => {
     .select('doctor_id, gateway, external_id, waba_id')
     .single();
 
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
   res.json({ ...data, conectado_via: 'embedded_signup' });
 });
 

@@ -4,6 +4,11 @@ import { sendWhatsAppMessage } from '../lib/whatsapp.js';
 import { processarMensagemComIA } from '../lib/iaAgent.js';
 import { escolherCloserAutomatico } from '../lib/distribuicao.js';
 import { buscarChunksRelevantes } from '../lib/knowledgeChunks.js';
+import { verifyHmac } from '../lib/signatures.js';
+import { claimWebhookEvent } from '../lib/salesWebhook.js';
+import { webhookIdempotencyReady } from '../lib/readiness.js';
+import { env } from '../config/env.js';
+import { logger } from '../lib/logger.js';
 
 const router = Router();
 
@@ -24,6 +29,27 @@ router.get('/', (req, res) => {
 // de qual número recebeu a mensagem, e usamos isso pra saber de qual médico é.
 // Cada médico cadastra o próprio phone_number_id na tela "Integrações".
 router.post('/', async (req, res) => {
+  // Assinatura HMAC-SHA256 sobre o corpo BRUTO exatamente como a Meta enviou
+  // (a Meta assina uma versão com unicode/barras escapados — por isso usamos
+  // req.rawBody, nunca o JSON re-serializado). Ver docs/platform/WEBHOOKS.md.
+  const signatureValid = verifyHmac({
+    algorithm: 'sha256',
+    secret: env.META_APP_SECRET,
+    rawBody: req.rawBody,
+    provided: req.get('X-Hub-Signature-256'),
+    prefix: 'sha256=',
+  });
+  const enforce = env.NODE_ENV === 'production' || env.WHATSAPP_WEBHOOK_SIGNATURE_ENFORCED === 'true';
+  if (enforce && !signatureValid) return res.sendStatus(403);
+  if (!signatureValid) logger.warn('WhatsApp webhook signature not enforced in non-production');
+
+  // Sem idempotência durável (webhook_events / migration 0005) não processamos
+  // em produção — evita a IA responder duas vezes ao mesmo evento.
+  if (env.NODE_ENV === 'production' && !(await webhookIdempotencyReady())) {
+    logger.error('WhatsApp webhook received but idempotency store not ready');
+    return res.sendStatus(503);
+  }
+
   res.sendStatus(200); // responde rápido, processa depois
 
   try {
@@ -63,6 +89,9 @@ router.post('/', async (req, res) => {
     }
 
     for (const msg of messages) {
+      if (!msg.id) continue;
+      const claimId = await claimWebhookEvent({ provider: 'whatsapp', externalEventId: msg.id, signatureValid, rawBody: req.rawBody });
+      if (!claimId) continue;
       const telefoneNormalizado = msg.from?.replace(/\D/g, '');
       const conteudo = msg.text?.body ?? `[${msg.type}]`;
 
@@ -141,7 +170,7 @@ router.post('/', async (req, res) => {
           pergunta: conteudo,
         });
       } catch (err) {
-        console.error('Erro na busca da base de conhecimento:', err);
+        logger.error({ err }, 'Knowledge search failed');
       }
 
       let resultado;
@@ -157,7 +186,7 @@ router.post('/', async (req, res) => {
           historico: historico || [],
         });
       } catch (err) {
-        console.error('Erro na IA de atendimento:', err);
+        logger.error({ err }, 'WhatsApp AI failed');
         continue; // não trava o webhook — a conversa fica visível pro closer normalmente
       }
 
@@ -208,7 +237,7 @@ router.post('/', async (req, res) => {
             timestamp_msg: new Date().toISOString(),
           });
         } catch (err) {
-          console.error('Erro ao enviar resposta da IA:', err);
+          logger.error({ err }, 'WhatsApp response failed');
         }
       }
 
@@ -232,7 +261,7 @@ router.post('/', async (req, res) => {
       // status 'qualificando' — não muda nada, IA continua na próxima mensagem
     }
   } catch (err) {
-    console.error('Erro processando webhook WhatsApp:', err);
+    logger.error({ err }, 'WhatsApp webhook processing failed');
   }
 });
 

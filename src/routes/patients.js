@@ -26,7 +26,7 @@ router.get('/', async (req, res) => {
   else if (scopedIds) query = query.in('leads.doctor_id', scopedIds);
 
   const { data: atendimentos, error } = await query;
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
 
   // Agrupa por paciente
   const porPaciente = {};

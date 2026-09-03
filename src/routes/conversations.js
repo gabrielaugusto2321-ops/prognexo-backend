@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { supabase } from '../lib/supabase.js';
 import { requireAuth, getScopedDoctorIds, isScopedToOwnLeadsOnly } from '../middleware/auth.js';
 import { sendWhatsAppMessage } from '../lib/whatsapp.js';
+import { authorizeResource } from '../lib/authz.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -52,7 +53,7 @@ router.get('/', async (req, res) => {
   }
 
   const { data, error } = await query;
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
 
   // Agrupa as linhas por lead, na ordem em que o lead mais recente apareceu primeiro
   const gruposPorLead = new Map();
@@ -98,18 +99,19 @@ router.post('/send', async (req, res) => {
     return res.status(400).json({ error: 'lead_id e texto são obrigatórios' });
   }
 
-  const { data: lead, error: leadError } = await supabase
-    .from('leads')
-    .select('id, telefone, doctor_id, sdr_responsavel_id')
-    .eq('id', lead_id)
-    .single();
-
-  if (leadError || !lead) return res.status(404).json({ error: 'Lead não encontrado' });
-
-  // Closer só pode responder os próprios leads
-  if (isScopedToOwnLeadsOnly(req.user) && lead.sdr_responsavel_id !== req.user.id) {
-    return res.status(403).json({ error: 'Sem acesso a este lead' });
+  // Resolve o lead no servidor e confirma o acesso (closer só responde os
+  // próprios leads) — nunca confia no lead_id do body sozinho.
+  const authorization = await authorizeResource({
+    user: req.user,
+    table: 'leads',
+    id: lead_id,
+    requireOwnerForCloser: true,
+    select: 'id, telefone, doctor_id, sdr_responsavel_id',
+  });
+  if (!authorization.ok) {
+    return res.status(authorization.reason === 'not_found' ? 404 : 403).json({ error: authorization.reason });
   }
+  const lead = authorization.row;
 
   const { data: integration } = await supabase
     .from('integrations')
@@ -157,7 +159,8 @@ router.post('/send', async (req, res) => {
   try {
     await sendWhatsAppMessage(integration.external_id, accessToken, lead.telefone, texto.trim());
   } catch (err) {
-    return res.status(502).json({ error: err.message });
+    req.log?.error({ err }, 'WhatsApp send failed');
+    return res.status(502).json({ error: 'whatsapp_send_failed', requestId: req.id });
   }
 
   const { data: novaMensagem, error: insertError } = await supabase
@@ -173,7 +176,10 @@ router.post('/send', async (req, res) => {
     .select()
     .single();
 
-  if (insertError) return res.status(500).json({ error: insertError.message });
+  if (insertError) {
+    req.log?.error({ err: insertError }, 'Database request failed');
+    return res.status(500).json({ error: 'internal_error', requestId: req.id });
+  }
 
   res.json(novaMensagem);
 });

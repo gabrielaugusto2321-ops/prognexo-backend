@@ -30,7 +30,7 @@ router.get('/', requireDoctorOrAdmin, async (req, res) => {
     .select('user_id, users(id, nome, email, ativo, criado_em)')
     .eq('doctor_id', targetDoctorId);
 
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
 
   const { data: doctorRow } = await supabase
     .from('doctors')
@@ -75,7 +75,7 @@ router.patch('/distribuicao', requireDoctorOrAdmin, async (req, res) => {
   }
 
   const { error } = await supabase.from('doctors').update({ distribuicao_automatica: !!ativo }).eq('id', doctor_id);
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
   res.json({ ok: true, distribuicao_automatica: !!ativo });
 });
 
@@ -96,7 +96,10 @@ router.post('/', requireDoctorOrAdmin, async (req, res) => {
 
   // Cria o usuário no Supabase Auth e dispara e-mail de convite (define senha no primeiro acesso)
   const { data: authUser, error: authError } = await supabase.auth.admin.inviteUserByEmail(email);
-  if (authError) return res.status(500).json({ error: authError.message });
+  if (authError) {
+    req.log?.error({ err: authError }, 'Team invite failed');
+    return res.status(500).json({ error: 'internal_error', requestId: req.id });
+  }
 
   const { error: userError } = await supabase.from('users').insert({
     id: authUser.user.id,
@@ -104,12 +107,18 @@ router.post('/', requireDoctorOrAdmin, async (req, res) => {
     email,
     role: 'closer',
   });
-  if (userError) return res.status(500).json({ error: userError.message });
+  if (userError) {
+    req.log?.error({ err: userError }, 'Database request failed');
+    return res.status(500).json({ error: 'internal_error', requestId: req.id });
+  }
 
   const { error: linkError } = await supabase
     .from('user_doctor_access')
     .insert({ user_id: authUser.user.id, doctor_id });
-  if (linkError) return res.status(500).json({ error: linkError.message });
+  if (linkError) {
+    req.log?.error({ err: linkError }, 'Database request failed');
+    return res.status(500).json({ error: 'internal_error', requestId: req.id });
+  }
 
   res.status(201).json({ id: authUser.user.id, nome, email, role: 'closer' });
 });
@@ -131,7 +140,7 @@ router.delete('/:userId', requireDoctorOrAdmin, async (req, res) => {
     .eq('user_id', userId)
     .eq('doctor_id', doctor_id);
 
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
   res.status(204).send();
 });
 

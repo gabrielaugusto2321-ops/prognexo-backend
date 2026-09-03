@@ -24,7 +24,7 @@ router.post('/limpar-leads-esquecidos', async (req, res) => {
     .in('status_atual', ['lead', 'conversa_iniciada'])
     .lt('criado_em', seteDiasAtras);
 
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
   if (!candidatos || candidatos.length === 0) {
     return res.json({ marcados_como_perdido: 0 });
   }

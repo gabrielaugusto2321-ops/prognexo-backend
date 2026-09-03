@@ -1,38 +1,19 @@
-import { Router } from 'express';
-import { normalizeStatus, registrarTransacao, resolveDoctorFromToken } from '../lib/salesWebhook.js';
+import { paymentWebhook, hmacSha1 } from './paymentFactory.js';
 
-const router = Router();
-
-// POST /webhooks/pagarme?secret=TOKEN_UNICO_DO_MEDICO
-// O deal_id vem no metadata da cobrança (definido na hora de criá-la) —
-// o token só confirma de qual médico é essa cobrança.
-router.post('/', async (req, res) => {
-  const token = req.query.secret;
-  const doctorId = await resolveDoctorFromToken('pagarme', token);
-  if (!doctorId) {
-    return res.status(401).json({ error: 'Token inválido' });
-  }
-
-  const evento = req.body;
-  const transactionId = evento?.data?.id;
-  const rawStatus = evento?.data?.status; // 'paid' | 'failed' | 'refunded' | 'pending'
-  const valor = evento?.data?.amount ? evento.data.amount / 100 : null;
-  const dealId = evento?.data?.metadata?.deal_id;
-
-  if (!transactionId || !rawStatus) {
-    return res.status(400).json({ error: 'Payload incompleto' });
-  }
-
-  await registrarTransacao({
-    gateway: 'pagarme',
-    gatewayTransactionId: transactionId,
-    valor,
-    status: normalizeStatus(rawStatus),
-    metodoPagamento: evento?.data?.payment_method,
-    dealId,
-  });
-
-  res.status(200).json({ ok: true });
+// POST /webhooks/pagarme
+// Autenticidade: HMAC-SHA1 do corpo bruto com PAGARME_WEBHOOK_SECRET, no header
+// `X-Hub-Signature` — ver docs/platform/WEBHOOKS.md.
+// O deal_id vem no metadata da cobrança e é validado contra o tenant do token.
+export default paymentWebhook({
+  provider: 'pagarme',
+  secretEnv: 'PAGARME_WEBHOOK_SECRET',
+  signature: hmacSha1('X-Hub-Signature'),
+  parse: (e) => ({
+    id: e?.data?.id,
+    eventId: e?.id || e?.data?.id,
+    status: e?.data?.status, // paid | failed | refunded | pending
+    valor: e?.data?.amount ? e.data.amount / 100 : null,
+    dealId: e?.data?.metadata?.deal_id,
+    method: e?.data?.payment_method,
+  }),
 });
-
-export default router;
