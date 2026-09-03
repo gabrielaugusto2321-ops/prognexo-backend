@@ -2,13 +2,14 @@ import { Router } from 'express';
 import { supabase } from '../lib/supabase.js';
 import { requireAuth, getScopedDoctorIds } from '../middleware/auth.js';
 import { sendWhatsAppMessage } from '../lib/whatsapp.js';
+import { attachTenantContext, tenantAllowsDoctor } from '../lib/tenantContext.js';
 
 const router = Router();
 router.use(requireAuth);
+router.use(attachTenantContext);
 
 async function checarAcesso(req, doctorId) {
-  const scopedIds = await getScopedDoctorIds(req.user);
-  return !scopedIds || scopedIds.includes(doctorId);
+  return tenantAllowsDoctor(req, doctorId, getScopedDoctorIds);
 }
 
 // GET /campanhas?doctor_id=
@@ -49,6 +50,7 @@ router.post('/', async (req, res) => {
       mensagem: mensagem.trim(),
       filtro_status: filtro_status || null,
       total_leads: count || 0,
+      ...(req.tenant?.enabled && req.tenant.organizationId ? { organization_id: req.tenant.organizationId } : {}),
     })
     .select()
     .single();

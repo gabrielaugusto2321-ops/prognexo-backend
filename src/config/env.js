@@ -52,6 +52,11 @@ const schema = z.object({
   // Checkout legado com cartão — desligado por padrão em produção.
   LEGACY_CARD_CHECKOUT_ENABLED: bool.default('false'),
 
+  // FASE 2.1 — núcleo multitenant. false = comportamento atual (doctor_id).
+  // true (local) = leads/deals/events/campanhas resolvem via organization/membership,
+  // mantendo compatibilidade com doctor_id pelo organization_doctor_map.
+  TENANT_CORE_ENABLED: bool.default('false'),
+
   // Segredos de webhook de pagamento
   PAGARME_WEBHOOK_SECRET: optionalSecret,
   KIWIFY_WEBHOOK_SECRET: optionalSecret,

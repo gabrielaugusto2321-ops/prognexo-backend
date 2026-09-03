@@ -3,9 +3,11 @@ import { z } from 'zod';
 import { supabase } from '../lib/supabase.js';
 import { requireAuth, getScopedDoctorIds, isScopedToOwnLeadsOnly } from '../middleware/auth.js';
 import { authorizeResource } from '../lib/authz.js';
+import { attachTenantContext, scopedDoctorIds } from '../lib/tenantContext.js';
 
 const router = Router();
 router.use(requireAuth);
+router.use(attachTenantContext);
 
 const etapaSchema = z
   .object({
@@ -27,7 +29,7 @@ function iniciais(nome) {
 // GET /deals?doctor_id= — retorna deals agrupáveis por etapa no frontend (kanban)
 router.get('/', async (req, res, next) => {
   try {
-    const scopedIds = await getScopedDoctorIds(req.user);
+    const scopedIds = await scopedDoctorIds(req, getScopedDoctorIds);
     const { doctor_id } = req.query;
 
     let query = supabase

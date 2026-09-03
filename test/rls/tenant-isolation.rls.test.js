@@ -122,25 +122,18 @@ d('RLS — isolamento entre organizações (Supabase local)', () => {
   });
 
   // ---- 4. closer A não ALTERA lead / deal / evento da Org B ----
-  it('4. closer A: UPDATE em lead da Org B não afeta nenhuma linha', async () => {
+  // Pós-0008 (AR-2): grants de INSERT/DELETE em leads foram revogados do browser;
+  // UPDATE só nas colunas status_atual/dados_extraidos. Escrita "real" via API.
+  it('4. closer A: UPDATE em lead da Org B não afeta nenhuma linha (coluna permitida)', async () => {
     await asUser(A_CLOSER, async (c) => {
       const r = await c.query('update public.leads set status_atual=$1 where id=$2', ['hacked', LEAD_B1]);
       expect(r.rowCount).toBe(0);
     });
   });
-  it('4b. closer A: DELETE em lead da Org B não afeta nenhuma linha', async () => {
-    await asUser(A_CLOSER, async (c) => {
-      const r = await c.query('delete from public.leads where id=$1', [LEAD_B1]);
-      expect(r.rowCount).toBe(0);
-    });
-  });
-  it('4c. closer A: INSERT de lead na Org B é bloqueado (sem policy de INSERT p/ closer)', async () => {
-    await asUser(A_CLOSER, async (c) => {
-      await expect(
-        c.query("insert into public.leads(doctor_id,nome) values ($1,'x')", [DB])
-      ).rejects.toThrow(/row-level security|violates/i);
-    });
-  });
+  it('4b. closer A: DELETE direto em leads é negado (grant revogado pela 0008)', () =>
+    expectDenied('authenticated', A_CLOSER, 'delete from public.leads where id=$1', [LEAD_B1]));
+  it('4c. closer A: INSERT direto em leads é negado (grant revogado pela 0008)', () =>
+    expectDenied('authenticated', A_CLOSER, "insert into public.leads(doctor_id,nome) values ($1,'x')", [DB]));
   it('4d. closer A: UPDATE em deal da Org B afeta 0 linhas (deals: RLS deny-all)', async () => {
     expect(await rowCountAs('authenticated', A_CLOSER, 'update public.deals set etapa=$1 where id=$2', ['x', DEAL_B])).toBe(0);
   });
@@ -186,21 +179,11 @@ d('RLS — isolamento entre organizações (Supabase local)', () => {
     });
   });
 
-  // ---- 8. trocar doctor_id no payload falha (WITH CHECK) ----
-  it('8. doctor A: UPDATE tentando mover o próprio lead para a Org B é bloqueado', async () => {
-    await asUser(A_OWNER, async (c) => {
-      await expect(
-        c.query('update public.leads set doctor_id=$1 where id=$2', [DB, LEAD_A1])
-      ).rejects.toThrow(/row-level security/i);
-    });
-  });
-  it('8b. doctor A: INSERT de lead com doctor_id da Org B é bloqueado', async () => {
-    await asUser(A_OWNER, async (c) => {
-      await expect(
-        c.query("insert into public.leads(doctor_id,nome) values ($1,'x')", [DB])
-      ).rejects.toThrow(/row-level security/i);
-    });
-  });
+  // ---- 8. trocar doctor_id no payload: bloqueado (grant de UPDATE dessa coluna revogado pela 0008) ----
+  it('8. doctor A: UPDATE de doctor_id direto em leads é negado', () =>
+    expectDenied('authenticated', A_OWNER, 'update public.leads set doctor_id=$1 where id=$2', [DB, LEAD_A1]));
+  it('8b. doctor A: INSERT direto em leads é negado (grant revogado)', () =>
+    expectDenied('authenticated', A_OWNER, "insert into public.leads(doctor_id,nome) values ($1,'x')", [DB]));
 
   // ---- 9. consultar por ID conhecido de outra org falha ----
   it('9. doctor A: SELECT por id de lead da Org B retorna 0 linhas', async () => {
@@ -212,20 +195,12 @@ d('RLS — isolamento entre organizações (Supabase local)', () => {
     });
   });
 
-  // ---- 11. integrations: doctor não vê segredos da outra org ----
-  it('11. doctor A: não lê integrations/webhook_token/access_token da Org B', async () => {
-    await asUser(A_OWNER, async (c) => {
-      const r = await c.query('select doctor_id, access_token, webhook_token from public.integrations');
-      expect(r.rows.every((x) => x.doctor_id === DA)).toBe(true);
-      expect(await count(c, 'select count(*)::int n from public.integrations where doctor_id=$1', [DB])).toBe(0);
-    });
-  });
-  it('11b. google_tokens: cada usuário só vê o próprio', async () => {
-    await asUser(A_OWNER, async (c) => {
-      const r = await c.query('select user_id from public.google_tokens');
-      expect(r.rows.map((x) => x.user_id)).toEqual([A_OWNER]);
-    });
-  });
+  // ---- 11. integrations/google_tokens: pós-0008 (AR-3) o browser NÃO lê essas
+  //      tabelas de jeito nenhum (grant de SELECT revogado). Estado seguro via view.
+  it('11. doctor A: SELECT direto em integrations é negado (AR-3)', () =>
+    expectDenied('authenticated', A_OWNER, 'select access_token, webhook_token from public.integrations'));
+  it('11b. usuário: SELECT direto em google_tokens é negado (AR-3)', () =>
+    expectDenied('authenticated', A_OWNER, 'select refresh_token from public.google_tokens'));
 
   // ---- 12. migrations 0003-0006 deixaram grants/policies no estado esperado ----
   it('12. pós-migrations: anon/authenticated SEM grant em campanhas/knowledge_base/knowledge_chunks/webhook_events/campanha_envios', async () => {
@@ -288,17 +263,22 @@ d('RLS — isolamento entre organizações (Supabase local)', () => {
     }
   });
 
-  // ---- 10. SELECT/INSERT/UPDATE/DELETE testados separadamente: caminho feliz de INSERT do doctor ----
-  it('10. doctor A: INSERT do próprio lead funciona (happy path de INSERT)', async () => {
+  // ---- 10. SELECT/INSERT/UPDATE/DELETE testados separadamente ----
+  // SELECT do próprio: ok. INSERT/DELETE direto: negado pós-0008 (só a API/service-role escreve).
+  it('10. doctor A: SELECT do próprio lead funciona (happy path de SELECT)', async () => {
     await asUser(A_OWNER, async (c) => {
-      const r = await c.query("insert into public.leads(doctor_id,nome) values ($1,'novo') returning id", [DA]);
+      const r = await c.query('select id from public.leads where id=$1', [LEAD_A1]);
       expect(r.rows).toHaveLength(1);
     });
   });
-  it('10b. doctor A: DELETE do próprio lead funciona (happy path de DELETE)', async () => {
+  it('10b. doctor A: UPDATE de coluna permitida do próprio lead funciona', async () => {
     await asUser(A_OWNER, async (c) => {
-      const r = await c.query('delete from public.leads where id=$1', [LEAD_A1]);
+      const r = await c.query("update public.leads set status_atual='proposta' where id=$1", [LEAD_A1]);
       expect(r.rowCount).toBe(1);
     });
+  });
+  it('10c. doctor A: INSERT/DELETE direto em leads é negado (grant revogado — escrita via API)', async () => {
+    await expectDenied('authenticated', A_OWNER, "insert into public.leads(doctor_id,nome) values ($1,'novo')", [DA]);
+    await expectDenied('authenticated', A_OWNER, 'delete from public.leads where id=$1', [LEAD_A1]);
   });
 });

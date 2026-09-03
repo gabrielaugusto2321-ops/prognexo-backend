@@ -4,9 +4,11 @@ import { supabase } from '../lib/supabase.js';
 import { requireAuth, getScopedDoctorIds, isScopedToOwnLeadsOnly } from '../middleware/auth.js';
 import { authorizeResource, assertRelatedBelongs, assertUserAccess } from '../lib/authz.js';
 import { escolherCloserAutomatico } from '../lib/distribuicao.js';
+import { attachTenantContext, scopedDoctorIds } from '../lib/tenantContext.js';
 
 const router = Router();
 router.use(requireAuth);
+router.use(attachTenantContext); // FASE 2.1 — no-op se TENANT_CORE_ENABLED=false
 
 // O cliente nunca envia req.body cru. O tenant (doctor_id) ainda vem no body
 // por compatibilidade com o modelo atual, mas é sempre validado contra
@@ -41,7 +43,7 @@ const updateSchema = z
 // GET /leads?doctor_id=&journey_type=&status=
 router.get('/', async (req, res, next) => {
   try {
-    const scopedIds = await getScopedDoctorIds(req.user);
+    const scopedIds = await scopedDoctorIds(req, getScopedDoctorIds);
     const { doctor_id, journey_type, status } = req.query;
 
     let query = supabase.from('leads').select('*').order('criado_em', { ascending: false });
@@ -102,9 +104,15 @@ router.post('/', async (req, res, next) => {
     if (!parsed.success) return res.status(400).json({ error: 'invalid_payload' });
     const body = parsed.data;
 
-    const scopedIds = await getScopedDoctorIds(req.user);
+    const scopedIds = await scopedDoctorIds(req, getScopedDoctorIds);
     if (scopedIds && !scopedIds.includes(body.doctor_id)) {
       return res.status(403).json({ error: 'forbidden' });
+    }
+    // FASE 2.1: quando o tenant core está ligado, grava organization_id derivada
+    // do contexto (nunca do body) e exige que o doctor_id do body case com o map.
+    const orgId = req.tenant?.enabled ? req.tenant.organizationId : undefined;
+    if (req.tenant?.enabled && req.tenant.doctorId && body.doctor_id !== req.tenant.doctorId) {
+      return res.status(403).json({ error: 'doctor_org_mismatch' });
     }
 
     // Todo id relacionado é fronteira de tenant: o produto tem que ser do mesmo médico.
@@ -126,7 +134,7 @@ router.post('/', async (req, res, next) => {
 
     const { data, error } = await supabase
       .from('leads')
-      .insert({ ...body, sdr_responsavel_id: owner || null })
+      .insert({ ...body, sdr_responsavel_id: owner || null, ...(orgId ? { organization_id: orgId } : {}) })
       .select()
       .single();
     if (error) throw error;

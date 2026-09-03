@@ -5,9 +5,11 @@ import { requireAuth, getScopedDoctorIds, isScopedToOwnLeadsOnly } from '../midd
 import { authorizeResource, assertRelatedBelongs, assertUserAccess } from '../lib/authz.js';
 import { criarEventoNoGoogle, temConflito } from '../lib/googleCalendar.js';
 import { logger } from '../lib/logger.js';
+import { attachTenantContext, scopedDoctorIds } from '../lib/tenantContext.js';
 
 const router = Router();
 router.use(requireAuth);
+router.use(attachTenantContext);
 
 const createSchema = z
   .object({
@@ -32,7 +34,7 @@ const statusSchema = z
 // Lista os eventos do período (usado pra desenhar o mês/dia na Agenda).
 router.get('/', async (req, res, next) => {
   try {
-    const scopedIds = await getScopedDoctorIds(req.user);
+    const scopedIds = await scopedDoctorIds(req, getScopedDoctorIds);
 
     let query = supabase
       .from('events')
@@ -64,7 +66,7 @@ router.post('/', async (req, res, next) => {
     if (!parsed.success) return res.status(400).json({ error: 'invalid_payload' });
     const body = parsed.data;
 
-    const scopedIds = await getScopedDoctorIds(req.user);
+    const scopedIds = await scopedDoctorIds(req, getScopedDoctorIds);
     if (scopedIds && !scopedIds.includes(body.doctor_id)) {
       return res.status(403).json({ error: 'forbidden' });
     }
@@ -103,6 +105,9 @@ router.post('/', async (req, res, next) => {
         inicio: body.inicio,
         fim,
         responsavel_id: responsavelId,
+        ...(req.tenant?.enabled && req.tenant.organizationId
+          ? { organization_id: req.tenant.organizationId, unit_id: req.tenant.defaultUnitId ?? null }
+          : {}),
       })
       .select('*, leads(nome, telefone, journey_type)')
       .single();

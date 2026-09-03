@@ -22,14 +22,20 @@ insert into public.users (id, nome, email, role, ativo) values
   ('00000000-0000-4000-8000-00000000a001', 'Dona da Org A',    'a-owner@local.test',   'doctor', true),
   ('00000000-0000-4000-8000-00000000b001', 'Dono da Org B',    'b-owner@local.test',   'doctor', true),
   ('00000000-0000-4000-8000-00000000ac01', 'Closer da Org A',  'a-closer@local.test',  'closer', true),
-  ('00000000-0000-4000-8000-00000000ad01', 'Admin Plataforma', 'plat-admin@local.test','admin',  true);
+  ('00000000-0000-4000-8000-00000000ad01', 'Admin Plataforma', 'plat-admin@local.test','admin',  true),
+  -- closer ligado às DUAS clínicas -> após backfill 0008: 2 memberships (2 orgs)
+  ('00000000-0000-4000-8000-0000000000c2', 'Closer Multi',     'multi@local.test',     'closer', true),
+  -- closer legado SEM user_doctor_access -> backfill registra 'closer_without_access'
+  ('00000000-0000-4000-8000-0000000000c3', 'Closer Orfao',     'orfao@local.test',     'closer', true);
 
 insert into public.doctors (id, owner_user_id, nome, status, plano) values
   ('00000000-0000-4000-8000-0000000000da', '00000000-0000-4000-8000-00000000a001', 'Clínica A', 'ativo', 'gratuito'),
   ('00000000-0000-4000-8000-0000000000db', '00000000-0000-4000-8000-00000000b001', 'Clínica B', 'ativo', 'gratuito');
 
 insert into public.user_doctor_access (user_id, doctor_id) values
-  ('00000000-0000-4000-8000-00000000ac01', '00000000-0000-4000-8000-0000000000da');
+  ('00000000-0000-4000-8000-00000000ac01', '00000000-0000-4000-8000-0000000000da'),
+  ('00000000-0000-4000-8000-0000000000c2', '00000000-0000-4000-8000-0000000000da'),
+  ('00000000-0000-4000-8000-0000000000c2', '00000000-0000-4000-8000-0000000000db');
 
 insert into public.products (id, doctor_id, nome, preco) values
   ('00000000-0000-4000-8000-00000000021a', '00000000-0000-4000-8000-0000000000da', 'Produto A', 100),
@@ -67,3 +73,7 @@ insert into public.campanhas (id, doctor_id, nome, mensagem) values
 insert into public.knowledge_base (id, doctor_id, titulo, conteudo) values
   ('00000000-0000-4000-8000-00000000081a', '00000000-0000-4000-8000-0000000000da', 'FAQ A', 'Conteudo interno A'),
   ('00000000-0000-4000-8000-00000000081b', '00000000-0000-4000-8000-0000000000db', 'FAQ B', 'Conteudo interno B');
+
+-- FASE 2.1: re-executa o backfill de tenancy AGORA que doctors/users existem
+-- (migrations rodam antes do seed; a função é idempotente).
+select public.backfill_tenant_core();
