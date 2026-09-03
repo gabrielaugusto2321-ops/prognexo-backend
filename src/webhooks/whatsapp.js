@@ -6,6 +6,7 @@ import { escolherCloserAutomatico } from '../lib/distribuicao.js';
 import { buscarChunksRelevantes } from '../lib/knowledgeChunks.js';
 import { verifyHmac } from '../lib/signatures.js';
 import { claimWebhookEvent } from '../lib/salesWebhook.js';
+import { CredentialVault } from '../lib/credentialVault.js';
 import { webhookIdempotencyReady } from '../lib/readiness.js';
 import { env } from '../config/env.js';
 import { logger } from '../lib/logger.js';
@@ -66,12 +67,21 @@ router.post('/', async (req, res) => {
     // Descobre de qual médico é esse número
     const { data: integration } = await supabase
       .from('integrations')
-      .select('doctor_id, external_id, access_token')
+      .select('id, doctor_id, gateway, external_id, access_token, webhook_token, access_token_encrypted, webhook_token_encrypted')
       .eq('gateway', 'whatsapp')
       .eq('external_id', phoneNumberId)
       .maybeSingle();
 
     if (!integration) return; // número ainda não vinculado a nenhum médico
+
+    // Token de envio resolvido pela camada de credenciais (descriptografa se cifrado).
+    let integrationAccessToken = null;
+    try {
+      integrationAccessToken = CredentialVault.readIntegrationCredentialsFromRow(integration, ['access_token']).access_token;
+    } catch (err) {
+      logger.error({ err }, 'WhatsApp integration credential unreadable');
+      return; // falha fechada — não tenta enviar sem token confiável
+    }
 
     const { data: doctor } = await supabase
       .from('doctors')
@@ -224,7 +234,7 @@ router.post('/', async (req, res) => {
       const pausaMs = Math.min(4000, 600 + resultado.resposta.length * 20);
       await new Promise((resolve) => setTimeout(resolve, pausaMs));
 
-      const accessToken = integration.access_token || process.env.META_SYSTEM_USER_TOKEN;
+      const accessToken = integrationAccessToken || process.env.META_SYSTEM_USER_TOKEN;
       if (accessToken) {
         try {
           await sendWhatsAppMessage(integration.external_id, accessToken, telefoneNormalizado, resultado.resposta);

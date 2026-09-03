@@ -66,19 +66,20 @@ export function makeDb(initial = {}) {
       if (op === 'insert' || op === 'upsert') {
         const items = Array.isArray(payload) ? payload : [payload];
         const inserted = [];
+        const CONFLICT_KEYS = ['provider', 'external_event_id', 'campanha_id', 'lead_id', 'gateway', 'gateway_transaction_id', 'doctor_id', 'user_id'];
         for (const item of items) {
           const row = { id: item.id || `mock-${name}-${rows.length + 1}`, ...item };
-          if (op === 'upsert' && onConflictIgnore) {
-            const dup = rows.find((r) =>
-              // conflito por qualquer combinação de chaves presentes no item, exceto payload-only
-              ['provider', 'external_event_id', 'campanha_id', 'lead_id', 'gateway', 'gateway_transaction_id', 'doctor_id']
-                .filter((k) => item[k] !== undefined)
-                .every((k) => r[k] === item[k]) &&
-              ['provider', 'external_event_id', 'campanha_id', 'lead_id', 'gateway', 'gateway_transaction_id', 'doctor_id'].some(
-                (k) => item[k] !== undefined
-              )
-            );
-            if (dup) continue; // ignoreDuplicates
+          if (op === 'upsert') {
+            const present = CONFLICT_KEYS.filter((k) => item[k] !== undefined);
+            const dup = present.length
+              ? rows.find((r) => present.every((k) => r[k] === item[k]))
+              : null;
+            if (dup) {
+              if (onConflictIgnore) continue; // ignoreDuplicates
+              Object.assign(dup, item); // upsert -> update
+              inserted.push(dup);
+              continue;
+            }
           }
           rows.push(row);
           inserted.push(row);

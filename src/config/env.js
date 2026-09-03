@@ -57,6 +57,24 @@ const schema = z.object({
   // mantendo compatibilidade com doctor_id pelo organization_doctor_map.
   TENANT_CORE_ENABLED: bool.default('false'),
 
+  // FASE 2.2 — criptografia de tokens/credenciais em repouso.
+  //   ENABLED=false  -> comportamento atual (plaintext); a camada CredentialVault
+  //                     apenas repassa para as colunas de texto puro.
+  //   DUAL_WRITE=true -> grava ciphertext + plaintext (janela de migração).
+  //   ALLOW_PLAINTEXT_READ=true -> leitura pode cair para plaintext quando ainda
+  //                     não há ciphertext (janela de migração). NUNCA cai para
+  //                     plaintext se o ciphertext existir e for inválido.
+  TOKEN_ENCRYPTION_ENABLED: bool.default('false'),
+  TOKEN_ENCRYPTION_DUAL_WRITE: bool.default('false'),
+  TOKEN_ENCRYPTION_ALLOW_PLAINTEXT_READ: bool.default('false'),
+  // Keyring de chaves AES-256-GCM: JSON {"v1":"<32 bytes base64>", ...}.
+  // ACTIVE_KEY nomeia a versão usada para gravar. Chaves nunca vão a log/DB/frontend.
+  TOKEN_ENCRYPTION_KEYRING: optionalSecret,
+  TOKEN_ENCRYPTION_ACTIVE_KEY: z.string().regex(/^v\d+$/).optional(),
+  // Chave HMAC-SHA256 (>=32 bytes base64) para o blind index de webhook_token.
+  // Independente das chaves AES. Trocar exige reconstruir os índices.
+  TOKEN_LOOKUP_HMAC_KEY: optionalSecret,
+
   // Segredos de webhook de pagamento
   PAGARME_WEBHOOK_SECRET: optionalSecret,
   KIWIFY_WEBHOOK_SECRET: optionalSecret,
@@ -129,6 +147,92 @@ function detectDangerousCombos(env) {
   return problems;
 }
 
+// Decodifica base64 OU base64url para Buffer.
+function decodeKeyMaterial(value) {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+  try {
+    return Buffer.from(normalized, 'base64');
+  } catch {
+    return null;
+  }
+}
+
+// Parser estrito do keyring. Rejeita: JSON inválido, objeto vazio, rótulo de
+// versão fora de /^v\d+$/, chave que não decodifica para exatamente 32 bytes,
+// e rótulo de versão duplicado (JSON.parse silenciaria o duplicado).
+export function parseKeyring(raw) {
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    throw new Error('TOKEN_ENCRYPTION_KEYRING ausente');
+  }
+  let obj;
+  try {
+    obj = JSON.parse(raw);
+  } catch {
+    throw new Error('TOKEN_ENCRYPTION_KEYRING não é JSON válido');
+  }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+    throw new Error('TOKEN_ENCRYPTION_KEYRING deve ser um objeto {versao: chave}');
+  }
+  // Detecção de rótulo duplicado no texto cru.
+  const labelMatches = [...raw.matchAll(/"(v\d+)"\s*:/g)].map((m) => m[1]);
+  const seen = new Set();
+  for (const label of labelMatches) {
+    if (seen.has(label)) throw new Error(`TOKEN_ENCRYPTION_KEYRING tem versão duplicada: ${label}`);
+    seen.add(label);
+  }
+  const entries = Object.entries(obj);
+  if (entries.length === 0) throw new Error('TOKEN_ENCRYPTION_KEYRING vazio');
+  const keyring = new Map();
+  for (const [label, material] of entries) {
+    if (!/^v\d+$/.test(label)) throw new Error(`TOKEN_ENCRYPTION_KEYRING: rótulo inválido "${label}"`);
+    const buf = decodeKeyMaterial(material);
+    if (!buf || buf.length !== 32) {
+      throw new Error(`TOKEN_ENCRYPTION_KEYRING: chave "${label}" não decodifica para 32 bytes`);
+    }
+    keyring.set(label, buf);
+  }
+  return keyring;
+}
+
+// Valida a configuração de criptografia de tokens. Só lança quando a criptografia
+// é EXIGIDA (ENABLED=true) ou quando há combinação incoerente de flags.
+function validateTokenEncryption(env, appEnv) {
+  const enabled = env.TOKEN_ENCRYPTION_ENABLED === 'true';
+  const dualWrite = env.TOKEN_ENCRYPTION_DUAL_WRITE === 'true';
+  const allowPlaintextRead = env.TOKEN_ENCRYPTION_ALLOW_PLAINTEXT_READ === 'true';
+  const problems = [];
+  const warnings = [];
+
+  if (dualWrite && !enabled) problems.push('TOKEN_ENCRYPTION_DUAL_WRITE=true exige TOKEN_ENCRYPTION_ENABLED=true');
+
+  if (enabled) {
+    let keyring;
+    try {
+      keyring = parseKeyring(env.TOKEN_ENCRYPTION_KEYRING);
+    } catch (err) {
+      problems.push(err.message);
+    }
+    if (!env.TOKEN_ENCRYPTION_ACTIVE_KEY) {
+      problems.push('TOKEN_ENCRYPTION_ACTIVE_KEY ausente com criptografia habilitada');
+    } else if (keyring && !keyring.has(env.TOKEN_ENCRYPTION_ACTIVE_KEY)) {
+      problems.push(`TOKEN_ENCRYPTION_ACTIVE_KEY "${env.TOKEN_ENCRYPTION_ACTIVE_KEY}" não está no keyring`);
+    }
+    const hmac = decodeKeyMaterial(env.TOKEN_LOOKUP_HMAC_KEY);
+    if (!hmac || hmac.length < 32) {
+      problems.push('TOKEN_LOOKUP_HMAC_KEY ausente ou com menos de 32 bytes');
+    }
+    // Combinação transitória mas insegura em produção.
+    if (appEnv === 'production' && allowPlaintextRead) {
+      warnings.push('TOKEN_ENCRYPTION_ALLOW_PLAINTEXT_READ=true em produção — só durante a migração');
+    }
+    if (appEnv === 'production' && dualWrite) {
+      warnings.push('TOKEN_ENCRYPTION_DUAL_WRITE=true em produção — plaintext ainda é gravado');
+    }
+  }
+  return { problems, warnings };
+}
+
 export function validateEnv(source = process.env) {
   const parsed = schema.safeParse(source);
   if (!parsed.success) {
@@ -141,6 +245,14 @@ export function validateEnv(source = process.env) {
   const dangerous = detectDangerousCombos(env);
   if (dangerous.length) {
     throw new Error(`Dangerous environment configuration:\n- ${dangerous.join('\n- ')}`);
+  }
+
+  const tokenEnc = validateTokenEncryption(env, appEnv);
+  if (tokenEnc.problems.length) {
+    throw new Error(`Invalid token-encryption configuration:\n- ${tokenEnc.problems.join('\n- ')}`);
+  }
+  for (const w of tokenEnc.warnings) {
+    process.stderr.write(`[env] AVISO: ${w}\n`);
   }
 
   // Variáveis obrigatórias por ambiente lógico.

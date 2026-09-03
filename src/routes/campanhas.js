@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase.js';
 import { requireAuth, getScopedDoctorIds } from '../middleware/auth.js';
 import { sendWhatsAppMessage } from '../lib/whatsapp.js';
 import { attachTenantContext, tenantAllowsDoctor } from '../lib/tenantContext.js';
+import { CredentialVault } from '../lib/credentialVault.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -164,12 +165,13 @@ router.post('/:id/enviar', async (req, res) => {
   if (!campanhaBase) return res.status(404).json({ error: 'Campanha não encontrada' });
   if (!(await checarAcesso(req, campanhaBase.doctor_id))) return res.status(403).json({ error: 'Sem acesso' });
 
-  const { data: integration } = await supabase
-    .from('integrations')
-    .select('external_id, access_token')
-    .eq('doctor_id', campanhaBase.doctor_id)
-    .eq('gateway', 'whatsapp')
-    .maybeSingle();
+  let integration;
+  try {
+    integration = await CredentialVault.readIntegrationCredentials({ doctorId: campanhaBase.doctor_id, gateway: 'whatsapp' });
+  } catch (err) {
+    req.log?.error({ err }, 'WhatsApp integration credential unreadable');
+    return res.status(400).json({ error: 'WhatsApp não configurado para este médico' });
+  }
 
   const accessToken = integration?.access_token || process.env.META_SYSTEM_USER_TOKEN;
   if (!integration?.external_id || !accessToken) {

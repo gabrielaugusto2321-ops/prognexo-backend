@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { supabase } from './supabase.js';
 import { logger } from './logger.js';
+import { CredentialVault } from './credentialVault.js';
 
 // Normaliza o status de qualquer gateway pro vocabulário interno do Prognexo.
 const STATUS_MAP = {
@@ -34,14 +35,10 @@ export function normalizeStatus(rawStatus) {
 // que o médico colou no próprio painel da plataforma.
 export async function resolveDoctorFromToken(gateway, token) {
   if (!token) return null;
-  const { data, error } = await supabase
-    .from('integrations')
-    .select('doctor_id')
-    .eq('gateway', gateway)
-    .eq('webhook_token', token)
-    .maybeSingle();
-  if (error) throw error;
-  return data?.doctor_id ?? null;
+  // Via CredentialVault: blind index (HMAC) + confirmação timing-safe quando a
+  // cripto está ligada; igualdade direta no modo legado.
+  const hit = await CredentialVault.resolveIntegrationByWebhookToken({ gateway, token });
+  return hit?.doctor_id ?? null;
 }
 
 // Idempotência durável: registra o evento uma única vez por (provider, id).

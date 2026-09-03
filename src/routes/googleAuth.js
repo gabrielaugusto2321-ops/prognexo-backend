@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase.js';
 import { requireAuth } from '../middleware/auth.js';
 import { buildAuthUrl, trocarCodigoPorTokens, estaConectado } from '../lib/googleCalendar.js';
 import { createOAuthState, consumeOAuthState, isAllowedRedirectBase } from '../lib/oauthState.js';
+import { CredentialVault } from '../lib/credentialVault.js';
 import { env } from '../config/env.js';
 import { logger } from '../lib/logger.js';
 
@@ -58,13 +59,13 @@ router.get('/callback', async (req, res) => {
 
     const tokens = await trocarCodigoPorTokens(code);
 
-    // Os tokens do Google NUNCA vão para o frontend — só para o banco,
+    // Os tokens do Google NUNCA vão para o frontend — só para o banco, via
+    // CredentialVault (cifrado em repouso quando TOKEN_ENCRYPTION_ENABLED),
     // sempre com o user_id do state (nunca de algo controlado pelo cliente).
-    await supabase.from('google_tokens').upsert({
-      user_id: ctx.userId,
-      refresh_token: tokens.refresh_token,
-      access_token: tokens.access_token,
-      expiry: tokens.expiry_date ? new Date(tokens.expiry_date).toISOString() : null,
+    await CredentialVault.writeGoogleTokens({
+      userId: ctx.userId,
+      values: { refresh_token: tokens.refresh_token, access_token: tokens.access_token },
+      extra: { expiry: tokens.expiry_date ? new Date(tokens.expiry_date).toISOString() : null },
     });
 
     return sendFrontendRedirect(res, 'conectado', 200, 'ok');

@@ -2,6 +2,20 @@ import { Router } from 'express';
 import { supabase } from '../lib/supabase.js';
 import { requireAuth } from '../middleware/auth.js';
 import { exchangeCodeForToken, registerPhoneNumber, subscribeAppToWaba } from '../lib/embeddedSignup.js';
+import { CredentialVault } from '../lib/credentialVault.js';
+
+// Remove qualquer coluna sensível/ciphertext antes de devolver ao frontend.
+const SENSITIVE_COLS = new Set([
+  'access_token', 'webhook_token',
+  'access_token_encrypted', 'webhook_token_encrypted', 'webhook_token_lookup',
+]);
+function stripSecrets(row) {
+  const out = {};
+  for (const [k, v] of Object.entries(row)) if (!SENSITIVE_COLS.has(k)) out[k] = v;
+  out.access_token_configurado = Boolean(row.access_token || row.access_token_encrypted);
+  out.webhook_token_configurado = Boolean(row.webhook_token || row.webhook_token_encrypted);
+  return out;
+}
 
 const router = Router();
 router.use(requireAuth);
@@ -34,13 +48,7 @@ router.get('/', async (req, res) => {
   const { data, error } = await supabase.from('integrations').select('*').eq('doctor_id', doctorId);
   if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
 
-  const semSegredo = data.map(({ access_token, webhook_token, ...resto }) => ({
-    ...resto,
-    access_token_configurado: Boolean(access_token),
-    webhook_token_configurado: Boolean(webhook_token),
-  }));
-
-  res.json(semSegredo);
+  res.json(data.map(stripSecrets));
 });
 
 // PATCH /integrations/whatsapp — médico informa o phone_number_id e/ou o
@@ -50,24 +58,37 @@ router.patch('/whatsapp', async (req, res) => {
   if (!doctorId) return res.status(400).json({ error: 'doctor_id necessário' });
 
   const { external_id, access_token } = req.body;
-  const camposParaAtualizar = {};
-  if (external_id !== undefined) camposParaAtualizar.external_id = external_id;
-  if (access_token !== undefined) camposParaAtualizar.access_token = access_token;
-
-  if (Object.keys(camposParaAtualizar).length === 0) {
+  if (external_id === undefined && access_token === undefined) {
     return res.status(400).json({ error: 'Nada para atualizar' });
+  }
+
+  // Precisa do id da linha para amarrar o ciphertext (AAD) ao registro certo.
+  const { data: alvo, error: findErr } = await supabase
+    .from('integrations')
+    .select('id')
+    .eq('doctor_id', doctorId)
+    .eq('gateway', 'whatsapp')
+    .maybeSingle();
+  if (findErr) { req.log?.error({ err: findErr }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
+  if (!alvo) return res.status(404).json({ error: 'integração não encontrada' });
+
+  const patch = {};
+  if (external_id !== undefined) patch.external_id = external_id;
+  if (access_token !== undefined) {
+    Object.assign(patch, CredentialVault.buildIntegrationCredentialPatch({
+      id: alvo.id, doctorId, gateway: 'whatsapp', values: { access_token },
+    }));
   }
 
   const { data, error } = await supabase
     .from('integrations')
-    .update(camposParaAtualizar)
-    .eq('doctor_id', doctorId)
-    .eq('gateway', 'whatsapp')
+    .update(patch)
+    .eq('id', alvo.id)
     .select('doctor_id, gateway, external_id')
     .single();
 
   if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
-  res.json({ ...data, access_token_configurado: Boolean(access_token) });
+  res.json({ ...data, access_token_configurado: access_token !== undefined });
 });
 
 // POST /integrations/whatsapp/embedded-callback

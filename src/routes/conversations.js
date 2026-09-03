@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase.js';
 import { requireAuth, getScopedDoctorIds, isScopedToOwnLeadsOnly } from '../middleware/auth.js';
 import { sendWhatsAppMessage } from '../lib/whatsapp.js';
 import { authorizeResource } from '../lib/authz.js';
+import { CredentialVault } from '../lib/credentialVault.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -113,12 +114,13 @@ router.post('/send', async (req, res) => {
   }
   const lead = authorization.row;
 
-  const { data: integration } = await supabase
-    .from('integrations')
-    .select('external_id, access_token')
-    .eq('doctor_id', lead.doctor_id)
-    .eq('gateway', 'whatsapp')
-    .maybeSingle();
+  let integration;
+  try {
+    integration = await CredentialVault.readIntegrationCredentials({ doctorId: lead.doctor_id, gateway: 'whatsapp' });
+  } catch (err) {
+    req.log?.error({ err }, 'WhatsApp integration credential unreadable');
+    return res.status(400).json({ error: 'WhatsApp não configurado para este médico' });
+  }
 
   if (!integration?.external_id) {
     return res.status(400).json({ error: 'WhatsApp não configurado para este médico' });

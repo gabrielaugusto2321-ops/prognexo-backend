@@ -1,5 +1,6 @@
 import { google } from 'googleapis';
 import { supabase } from './supabase.js';
+import { CredentialVault } from './credentialVault.js';
 
 function getOAuthClient() {
   return new google.auth.OAuth2(
@@ -29,11 +30,11 @@ export async function trocarCodigoPorTokens(code) {
 
 // Monta um client autenticado pra fazer chamadas em nome de um usuário específico
 async function getClientParaUsuario(userId) {
-  const { data } = await supabase.from('google_tokens').select('*').eq('user_id', userId).maybeSingle();
-  if (!data) return null;
+  const creds = await CredentialVault.readGoogleTokens({ userId });
+  if (!creds || !creds.refresh_token) return null;
 
   const client = getOAuthClient();
-  client.setCredentials({ refresh_token: data.refresh_token });
+  client.setCredentials({ refresh_token: creds.refresh_token });
   return client;
 }
 
