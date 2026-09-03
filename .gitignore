@@ -43,3 +43,7 @@ temp/
 Thumbs.db
 *.suo
 *.sw?
+
+# Supabase CLI (estado local, nunca versionar)
+supabase/.temp/
+supabase/.branches/
