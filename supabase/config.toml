@@ -1,0 +1,50 @@
+# Config do Supabase CLI para desenvolvimento LOCAL.
+# Nunca aponta para produção. `project_id` é só um rótulo local.
+# Uso documentado em supabase/README.md — NADA é executado automaticamente.
+
+project_id = "prognexo-local"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 17
+
+[db.pooler]
+enabled = false
+
+[studio]
+enabled = true
+port = 54323
+
+[inbucket]
+enabled = true
+port = 54324
+
+[auth]
+enabled = true
+site_url = "http://localhost:5173"
+additional_redirect_urls = ["http://localhost:5173"]
+jwt_expiry = 3600
+enable_refresh_token_rotation = true
+enable_signup = true
+# Proteção de senha vazada (HIBP) — R03/03-security-baseline.
+minimum_password_length = 12
+
+[auth.email]
+enable_signup = true
+enable_confirmations = true
+double_confirm_changes = true
+
+# Sem provedores externos no local — o fluxo de convite usa o Inbucket (porta 54324).
+[analytics]
+enabled = false
+
+[edge_runtime]
+enabled = false
