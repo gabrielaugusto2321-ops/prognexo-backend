@@ -41,6 +41,10 @@ export function makeDb(initial = {}) {
       if (/\borganizations\s*\(/.test(selectStr) && row.organization_id) {
         out.organizations = table('organizations').find((o) => o.id === row.organization_id) || null;
       }
+      // memberships -> users(...) via user_id
+      if (/\busers\s*\(/.test(selectStr) && row.user_id) {
+        out.users = table('users').find((u) => u.id === row.user_id) || null;
+      }
       // memberships -> membership_units( units(...) ) via membership_id -> unit_id
       if (/\bmembership_units\s*\(/.test(selectStr) && row.id) {
         out.membership_units = table('membership_units')
@@ -147,8 +151,152 @@ export function makeDb(initial = {}) {
     return q;
   }
 
+  // ---------------------------------------------------------------------
+  // FASE 2.6 — espelho em JS das RPCs de team_member_* (migration 0012),
+  // só para os testes de CONTRATO HTTP da rota (auth gate, mapeamento de
+  // erro, shape de resposta). A correção de segurança de verdade (RLS,
+  // search_path, escalonamento, atomicidade, último owner) é validada contra
+  // Postgres real em test/rls/team-memberships.rls.test.js — este mock NUNCA
+  // substitui aquela prova.
+  // ---------------------------------------------------------------------
+  const GRANTABLE = {
+    platform_admin: () => true,
+    organization_owner: (role) => role !== 'platform_admin',
+    organization_admin: (role) => ['manager', 'closer', 'receptionist', 'professional', 'financial', 'viewer'].includes(role),
+  };
+  // espelha team_actor_can_manage_target (migration 0012): hierarquia
+  // estrita — organization_admin nunca toca outro admin/owner/platform_admin
+  // nem a si mesmo; só owner/platform_admin administram admin/owner.
+  function canManageTarget(actorRole, targetRole, isSelf) {
+    if (actorRole === 'platform_admin') return true;
+    if (actorRole === 'organization_admin' && isSelf) return false;
+    if (actorRole === 'organization_owner') return targetRole !== 'platform_admin';
+    if (actorRole === 'organization_admin') return ['manager', 'closer', 'receptionist', 'professional', 'financial', 'viewer'].includes(targetRole);
+    return false;
+  }
+  function rpcActorRole(orgId, actorId) {
+    const isPlatformAdmin =
+      table('platform_admins').some((p) => p.user_id === actorId) ||
+      table('users').some((u) => u.id === actorId && u.role === 'admin');
+    if (isPlatformAdmin) return 'platform_admin';
+    const m = table('memberships').find((x) => x.organization_id === orgId && x.user_id === actorId && x.status === 'active');
+    return m?.role ?? null;
+  }
+  function rpcSyncBridge(orgId, userId, role, active) {
+    const map = table('organization_doctor_map').find((m) => m.organization_id === orgId);
+    if (!map) return;
+    const uda = table('user_doctor_access');
+    const idx = uda.findIndex((r) => r.user_id === userId && r.doctor_id === map.doctor_id);
+    if (role === 'closer' && active) {
+      if (idx === -1) uda.push({ user_id: userId, doctor_id: map.doctor_id });
+    } else if (idx !== -1) {
+      uda.splice(idx, 1);
+    }
+  }
+  function rpcAudit(orgId, actorId, targetId, action, result, detail) {
+    table('team_membership_events').push({
+      id: `mock-tme-${table('team_membership_events').length + 1}`,
+      organization_id: orgId, actor_user_id: actorId, target_user_id: targetId,
+      action, result, detail: detail || {}, created_at: new Date().toISOString(),
+    });
+  }
+  function rpcErr(message) { return { data: null, error: { message } }; }
+  function ok(data) { return { data, error: null }; }
+
+  const RPCS = {
+    team_member_add({ p_organization_id, p_actor_user_id, p_target_user_id, p_role, p_unit_ids }) {
+      if (!table('organizations').some((o) => o.id === p_organization_id)) return rpcErr('not_found');
+      if (!table('users').some((u) => u.id === p_target_user_id)) return rpcErr('not_found');
+      const actorRole = rpcActorRole(p_organization_id, p_actor_user_id);
+      if (!actorRole || !['organization_owner', 'organization_admin', 'platform_admin'].includes(actorRole)) return rpcErr('forbidden');
+      if (!GRANTABLE[actorRole](p_role)) return rpcErr('forbidden');
+      if (table('memberships').some((m) => m.organization_id === p_organization_id && m.user_id === p_target_user_id)) return rpcErr('conflict');
+      const units = table('units');
+      for (const uid of p_unit_ids || []) {
+        if (!units.some((u) => u.id === uid && u.organization_id === p_organization_id)) return rpcErr('unit_not_in_organization');
+      }
+      const id = `mock-membership-${table('memberships').length + 1}`;
+      table('memberships').push({ id, organization_id: p_organization_id, user_id: p_target_user_id, role: p_role, status: 'active' });
+      for (const uid of p_unit_ids || []) table('membership_units').push({ membership_id: id, unit_id: uid });
+      rpcSyncBridge(p_organization_id, p_target_user_id, p_role, true);
+      rpcAudit(p_organization_id, p_actor_user_id, p_target_user_id, 'add', 'success', { role: p_role });
+      return ok({ membership_id: id, role: p_role, status: 'active' });
+    },
+    team_member_change_role({ p_organization_id, p_actor_user_id, p_target_user_id, p_new_role }) {
+      const m = table('memberships').find((x) => x.organization_id === p_organization_id && x.user_id === p_target_user_id);
+      if (!m) return rpcErr('not_found');
+      const actorRole = rpcActorRole(p_organization_id, p_actor_user_id);
+      if (!actorRole || !['organization_owner', 'organization_admin', 'platform_admin'].includes(actorRole)) return rpcErr('forbidden');
+      if (!GRANTABLE[actorRole](p_new_role)) return rpcErr('forbidden');
+      if (!canManageTarget(actorRole, m.role, p_actor_user_id === p_target_user_id)) return rpcErr('forbidden');
+      if (m.role === 'organization_owner' && p_new_role !== 'organization_owner') {
+        const owners = table('memberships').filter((x) => x.organization_id === p_organization_id && x.role === 'organization_owner' && x.status === 'active');
+        if (owners.length <= 1) return rpcErr('last_owner_protected');
+      }
+      const from = m.role;
+      m.role = p_new_role;
+      rpcSyncBridge(p_organization_id, p_target_user_id, p_new_role, m.status === 'active');
+      rpcAudit(p_organization_id, p_actor_user_id, p_target_user_id, 'change_role', 'success', { from, to: p_new_role });
+      return ok({ role: m.role, status: m.status });
+    },
+    team_member_set_status({ p_organization_id, p_actor_user_id, p_target_user_id, p_new_status }) {
+      const m = table('memberships').find((x) => x.organization_id === p_organization_id && x.user_id === p_target_user_id);
+      if (!m) return rpcErr('not_found');
+      const actorRole = rpcActorRole(p_organization_id, p_actor_user_id);
+      if (!actorRole || !['organization_owner', 'organization_admin', 'platform_admin'].includes(actorRole)) return rpcErr('forbidden');
+      if (!canManageTarget(actorRole, m.role, p_actor_user_id === p_target_user_id)) return rpcErr('forbidden');
+      if (m.role === 'organization_owner' && p_new_status === 'suspended') {
+        const owners = table('memberships').filter((x) => x.organization_id === p_organization_id && x.role === 'organization_owner' && x.status === 'active');
+        if (owners.length <= 1) return rpcErr('last_owner_protected');
+      }
+      m.status = p_new_status;
+      rpcSyncBridge(p_organization_id, p_target_user_id, m.role, p_new_status === 'active');
+      rpcAudit(p_organization_id, p_actor_user_id, p_target_user_id, p_new_status === 'suspended' ? 'suspend' : 'reactivate', 'success', { to: p_new_status });
+      return ok({ role: m.role, status: m.status });
+    },
+    team_member_remove({ p_organization_id, p_actor_user_id, p_target_user_id }) {
+      const rows = table('memberships');
+      const m = rows.find((x) => x.organization_id === p_organization_id && x.user_id === p_target_user_id);
+      if (!m) return rpcErr('not_found');
+      const actorRole = rpcActorRole(p_organization_id, p_actor_user_id);
+      if (!actorRole || !['organization_owner', 'organization_admin', 'platform_admin'].includes(actorRole)) return rpcErr('forbidden');
+      if (!canManageTarget(actorRole, m.role, p_actor_user_id === p_target_user_id)) return rpcErr('forbidden');
+      if (m.role === 'organization_owner') {
+        const owners = rows.filter((x) => x.organization_id === p_organization_id && x.role === 'organization_owner' && x.status === 'active');
+        if (owners.length <= 1) return rpcErr('last_owner_protected');
+      }
+      rows.splice(rows.indexOf(m), 1);
+      const mu = table('membership_units');
+      for (let i = mu.length - 1; i >= 0; i -= 1) if (mu[i].membership_id === m.id) mu.splice(i, 1);
+      rpcSyncBridge(p_organization_id, p_target_user_id, m.role, false);
+      rpcAudit(p_organization_id, p_actor_user_id, p_target_user_id, 'remove', 'success', { role: m.role });
+      return ok({ removed: true });
+    },
+    team_member_set_units({ p_organization_id, p_actor_user_id, p_target_user_id, p_unit_ids }) {
+      const m = table('memberships').find((x) => x.organization_id === p_organization_id && x.user_id === p_target_user_id);
+      if (!m) return rpcErr('not_found');
+      const actorRole = rpcActorRole(p_organization_id, p_actor_user_id);
+      if (!actorRole || !['organization_owner', 'organization_admin', 'platform_admin'].includes(actorRole)) return rpcErr('forbidden');
+      if (!canManageTarget(actorRole, m.role, p_actor_user_id === p_target_user_id)) return rpcErr('forbidden');
+      const units = table('units');
+      for (const uid of p_unit_ids || []) {
+        if (!units.some((u) => u.id === uid && u.organization_id === p_organization_id)) return rpcErr('unit_not_in_organization');
+      }
+      const mu = table('membership_units');
+      for (let i = mu.length - 1; i >= 0; i -= 1) if (mu[i].membership_id === m.id) mu.splice(i, 1);
+      for (const uid of p_unit_ids || []) mu.push({ membership_id: m.id, unit_id: uid });
+      rpcAudit(p_organization_id, p_actor_user_id, p_target_user_id, 'set_units', 'success', { unit_count: (p_unit_ids || []).length });
+      return ok({ unit_ids: p_unit_ids });
+    },
+  };
+
   const client = {
     from: vi.fn((name) => makeQuery(name)),
+    rpc: vi.fn(async (name, params) => {
+      const fn = RPCS[name];
+      if (!fn) return { data: null, error: { message: `mock rpc not implemented: ${name}` } };
+      return fn(params || {});
+    }),
     auth: {
       getUser: vi.fn(async (token) => {
         const u = authState.users[token];

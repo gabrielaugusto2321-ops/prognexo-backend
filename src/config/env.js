@@ -57,6 +57,14 @@ const schema = z.object({
   // mantendo compatibilidade com doctor_id pelo organization_doctor_map.
   TENANT_CORE_ENABLED: bool.default('false'),
 
+  // FASE 2.6 — cutover do módulo de equipe para memberships. false = /team
+  // continua 100% sobre user_doctor_access (comportamento atual, inalterado).
+  // true (só local) = /team lê e escreve via memberships/membership_units
+  // (RPCs transacionais da migration 0012); user_doctor_access permanece como
+  // ponte só para role='closer'. Sem fallback silencioso: divergência que
+  // possa afetar autorização retorna erro, nunca decide sozinha.
+  TEAM_MEMBERSHIPS_ENABLED: bool.default('false'),
+
   // FASE 2.2 — criptografia de tokens/credenciais em repouso.
   //   ENABLED=false  -> comportamento atual (plaintext); a camada CredentialVault
   //                     apenas repassa para as colunas de texto puro.

@@ -69,3 +69,12 @@ export const webhookTokenRotateLimiter = rateLimit({
   limit: 5,
   keyGenerator: (req) => req.user?.id || ipKey(req),
 });
+
+// FASE 2.6 — mutações de equipe (convidar/alterar papel/suspender/reativar/
+// remover/unidades): sensível (convite dispara e-mail; risco de spam/abuso).
+export const teamMutationLimiter = rateLimit({
+  ...base,
+  windowMs: 60_000,
+  limit: 20,
+  keyGenerator: (req) => req.user?.id || ipKey(req),
+});
