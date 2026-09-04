@@ -264,6 +264,21 @@ export const CredentialVault = {
     return patch;
   },
 
+  // FASE 2.4 — gera um webhook_token novo e devolve o VALOR CLARO **uma única
+  // vez** para o chamador, junto com o patch de persistência (já cifrado/indexado
+  // conforme as flags) e o fingerprint não-reversível para a UI.
+  // O token anterior deixa de resolver assim que o patch é gravado.
+  buildWebhookTokenRotation({ id, doctorId, gateway }) {
+    const token = crypto.randomBytes(32).toString('base64url'); // >=256 bits
+    const fingerprint = crypto.createHash('sha256').update(token).digest('hex').slice(0, 12);
+    const patch = {
+      ...this.buildIntegrationCredentialPatch({ id, doctorId, gateway, values: { webhook_token: token } }),
+      webhook_token_rotated_at: new Date().toISOString(),
+      webhook_token_fingerprint: fingerprint,
+    };
+    return { token, fingerprint, patch };
+  },
+
   async writeIntegrationCredentials({ id, doctorId, gateway, values }) {
     const patch = this.buildIntegrationCredentialPatch({ id, doctorId, gateway, values });
     const { error } = await supabase.from('integrations').update(patch).eq('id', id);

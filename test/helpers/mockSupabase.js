@@ -66,6 +66,7 @@ export function makeDb(initial = {}) {
         filters.every(([kind, col, val]) => {
           const cur = fieldValue(row, col);
           if (kind === 'eq') return cur === val;
+          if (kind === 'is') return (val === null ? cur == null : cur === val);
           if (kind === 'in') return val.includes(cur);
           if (kind === 'gte') return cur >= val;
           if (kind === 'lte') return cur <= val;
@@ -131,6 +132,7 @@ export function makeDb(initial = {}) {
       upsert(p, opts) { op = 'upsert'; payload = p; onConflictIgnore = !!opts?.ignoreDuplicates; return q; },
       delete() { op = 'delete'; return q; },
       eq(col, val) { filters.push(['eq', col, val]); return q; },
+      is(col, val) { filters.push(['is', col, val]); return q; },
       in(col, val) { filters.push(['in', col, val]); return q; },
       gte(col, val) { filters.push(['gte', col, val]); return q; },
       lte(col, val) { filters.push(['lte', col, val]); return q; },

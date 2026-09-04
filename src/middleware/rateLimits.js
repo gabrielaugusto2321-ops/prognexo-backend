@@ -60,3 +60,12 @@ export const aiLimiter = rateLimit({
   limit: 30,
   keyGenerator: (req) => req.user?.id || ipKey(req),
 });
+
+// FASE 2.4 — rotação de segredo de webhook: operação sensível e rara.
+// Por usuário autenticado; janela curta e limite baixo.
+export const webhookTokenRotateLimiter = rateLimit({
+  ...base,
+  windowMs: 60_000,
+  limit: 5,
+  keyGenerator: (req) => req.user?.id || ipKey(req),
+});
