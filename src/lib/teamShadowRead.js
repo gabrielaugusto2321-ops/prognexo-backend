@@ -28,12 +28,17 @@ export async function shadowCompareTeam(req, doctorId) {
     return { organizationId: null, doctorId, onlyLegacy: [], onlyMembership: [], match: false };
   }
 
-  const [{ data: legacy }, { data: memberships }] = await Promise.all([
+  const [{ data: legacy }, { data: memberships }, { data: doctorRow }] = await Promise.all([
     supabase.from('user_doctor_access').select('user_id').eq('doctor_id', doctorId),
     supabase.from('memberships').select('user_id, role, status').eq('organization_id', organizationId),
+    supabase.from('doctors').select('owner_user_id').eq('id', doctorId).maybeSingle(),
   ]);
 
+  // O acesso legado a um doctor é user_doctor_access UNIÃO {owner_user_id} — o
+  // dono da clínica não tem linha em user_doctor_access, mas É o organization_owner
+  // no modelo novo. Sem incluí-lo, todo owner apareceria como falsa divergência.
   const legacyIds = new Set((legacy || []).map((r) => r.user_id));
+  if (doctorRow?.owner_user_id) legacyIds.add(doctorRow.owner_user_id);
   const activeMembershipIds = new Set((memberships || []).filter((m) => m.status === 'active').map((m) => m.user_id));
 
   const onlyLegacy = [...legacyIds].filter((id) => !activeMembershipIds.has(id));
