@@ -74,6 +74,26 @@ insert into public.knowledge_base (id, doctor_id, titulo, conteudo) values
   ('00000000-0000-4000-8000-00000000081a', '00000000-0000-4000-8000-0000000000da', 'FAQ A', 'Conteudo interno A'),
   ('00000000-0000-4000-8000-00000000081b', '00000000-0000-4000-8000-0000000000db', 'FAQ B', 'Conteudo interno B');
 
--- FASE 2.1: re-executa o backfill de tenancy AGORA que doctors/users existem
--- (migrations rodam antes do seed; a função é idempotente).
+-- FASE 2.3: dados sintéticos dos módulos expandidos (sufixos hex de 12 chars).
+--   knowledge_chunks 00000000091a/091b | ia_agentes_bdr 0000000a0a1a/0a1b
+--   atendimentos 0000000b0b1a/0b1b     | transactions 0000000c0c1a/0c1b
+insert into public.knowledge_chunks (id, knowledge_base_id, doctor_id, titulo, conteudo, chunk_index) values
+  ('00000000-0000-4000-8000-00000000091a', '00000000-0000-4000-8000-00000000081a', '00000000-0000-4000-8000-0000000000da', 'Chunk A', 'trecho interno A', 0),
+  ('00000000-0000-4000-8000-00000000091b', '00000000-0000-4000-8000-00000000081b', '00000000-0000-4000-8000-0000000000db', 'Chunk B', 'trecho interno B', 0);
+
+insert into public.ia_agentes_bdr (id, doctor_id, nome, contexto) values
+  ('00000000-0000-4000-8000-0000000a0a1a', '00000000-0000-4000-8000-0000000000da', 'BDR A', 'contexto BDR A'),
+  ('00000000-0000-4000-8000-0000000a0a1b', '00000000-0000-4000-8000-0000000000db', 'BDR B', 'contexto BDR B');
+
+insert into public.atendimentos (id, lead_id, event_id, data, valor, compareceu) values
+  ('00000000-0000-4000-8000-0000000b0b1a', '00000000-0000-4000-8000-0000000001a1', '00000000-0000-4000-8000-00000000041a', now(), 500, true),
+  ('00000000-0000-4000-8000-0000000b0b1b', '00000000-0000-4000-8000-0000000001b1', '00000000-0000-4000-8000-00000000041b', now(), 700, true);
+
+insert into public.transactions (id, deal_id, gateway, gateway_transaction_id, valor, status, metodo_pagamento) values
+  ('00000000-0000-4000-8000-0000000c0c1a', '00000000-0000-4000-8000-00000000031a', 'pagarme', 'tx-A-1', 500, 'pago', 'pix'),
+  ('00000000-0000-4000-8000-0000000c0c1b', '00000000-0000-4000-8000-00000000031b', 'pagarme', 'tx-B-1', 700, 'pago', 'pix');
+
+-- FASE 2.1/2.3: re-executa os backfills de tenancy AGORA que doctors/users existem
+-- (migrations rodam antes do seed; as funções são idempotentes).
 select public.backfill_tenant_core();
+select public.backfill_tenant_expansion();

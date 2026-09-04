@@ -67,7 +67,7 @@ router.post('/', async (req, res) => {
     // Descobre de qual médico é esse número
     const { data: integration } = await supabase
       .from('integrations')
-      .select('id, doctor_id, gateway, external_id, access_token, webhook_token, access_token_encrypted, webhook_token_encrypted')
+      .select('id, doctor_id, organization_id, gateway, external_id, access_token, webhook_token, access_token_encrypted, webhook_token_encrypted')
       .eq('gateway', 'whatsapp')
       .eq('external_id', phoneNumberId)
       .maybeSingle();
@@ -119,6 +119,8 @@ router.post('/', async (req, res) => {
           .from('leads')
           .insert({
             doctor_id: integration.doctor_id,
+            // tenant herdado da integração (resolução confiável do servidor)
+            ...(integration.organization_id ? { organization_id: integration.organization_id } : {}),
             telefone: telefoneNormalizado,
             nome: contactsPorTelefone[msg.from] || telefoneNormalizado,
             status_atual: 'lead',

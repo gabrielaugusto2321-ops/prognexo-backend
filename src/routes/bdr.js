@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { supabase } from '../lib/supabase.js';
 import { requireAuth, getScopedDoctorIds } from '../middleware/auth.js';
 import { gerarVariacoesProspeccao } from '../lib/bdrAgent.js';
+import { attachTenantContext, tenantAllowsDoctor } from '../lib/tenantContext.js';
 
 // Agente BDR: prospecção ativa sob demanda. 1 agente por médico.
 // Não roda no webhook, não qualifica lead — só o CRUD do agente e um
@@ -9,11 +10,12 @@ import { gerarVariacoesProspeccao } from '../lib/bdrAgent.js';
 
 const router = Router();
 router.use(requireAuth);
+router.use(attachTenantContext); // no-op se TENANT_CORE_ENABLED=false
 
 async function checarAcesso(req, doctorId) {
-  const scopedIds = await getScopedDoctorIds(req.user);
-  return !scopedIds || scopedIds.includes(doctorId);
+  return tenantAllowsDoctor(req, doctorId, getScopedDoctorIds);
 }
+const orgOf = (req) => (req.tenant?.enabled && req.tenant.organizationId ? { organization_id: req.tenant.organizationId } : {});
 
 // GET /bdr?doctor_id=  — o agente BDR do médico (ou null se não tiver)
 router.get('/', async (req, res) => {
@@ -41,7 +43,7 @@ router.post('/', async (req, res) => {
   const { data, error } = await supabase
     .from('ia_agentes_bdr')
     .upsert(
-      { doctor_id, nome: nome?.trim() || 'BDR', contexto: contexto?.trim() || null },
+      { doctor_id, nome: nome?.trim() || 'BDR', contexto: contexto?.trim() || null, ...orgOf(req) },
       { onConflict: 'doctor_id' }
     )
     .select()

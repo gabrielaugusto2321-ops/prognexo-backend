@@ -69,6 +69,8 @@ export async function reindexarKnowledgeBaseItem(item) {
   const linhas = textos.map((conteudo, i) => ({
     knowledge_base_id: item.id,
     doctor_id: item.doctor_id,
+    // herda o tenant do item pai (FASE 2.3); null quando a flag está off
+    ...(item.organization_id ? { organization_id: item.organization_id } : {}),
     titulo: item.titulo || null,
     conteudo,
     chunk_index: i,

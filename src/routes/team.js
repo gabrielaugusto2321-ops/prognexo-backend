@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { supabase } from '../lib/supabase.js';
 import { requireAuth, getScopedDoctorIds } from '../middleware/auth.js';
+import { shadowCompareTeam } from '../lib/teamShadowRead.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -24,6 +25,10 @@ router.get('/', requireDoctorOrAdmin, async (req, res) => {
   if (scopedIds && !scopedIds.includes(targetDoctorId)) {
     return res.status(403).json({ error: 'Sem acesso a este médico' });
   }
+
+  // FASE 2.3: shadow-read — só registra divergência user_doctor_access x
+  // memberships quando a flag está ligada. Não altera a resposta nem o banco.
+  await shadowCompareTeam(req, targetDoctorId).catch(() => {});
 
   const { data: vinculos, error } = await supabase
     .from('user_doctor_access')

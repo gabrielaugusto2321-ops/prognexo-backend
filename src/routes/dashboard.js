@@ -1,13 +1,15 @@
 import { Router } from 'express';
 import { supabase } from '../lib/supabase.js';
 import { requireAuth, getScopedDoctorIds } from '../middleware/auth.js';
+import { attachTenantContext, scopedDoctorIds } from '../lib/tenantContext.js';
 
 const router = Router();
 router.use(requireAuth);
+router.use(attachTenantContext); // no-op se TENANT_CORE_ENABLED=false
 
 // GET /dashboard?doctor_id=&periodo_dias=30
 router.get('/', async (req, res) => {
-  const scopedIds = await getScopedDoctorIds(req.user);
+  const scopedIds = await scopedDoctorIds(req, getScopedDoctorIds);
   const { doctor_id, periodo_dias = 30 } = req.query;
   const desde = new Date(Date.now() - periodo_dias * 86400000).toISOString();
 

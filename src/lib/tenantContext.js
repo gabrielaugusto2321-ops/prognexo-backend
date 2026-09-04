@@ -22,7 +22,8 @@ export async function resolveTenantContext(req) {
   const requestedOrg =
     req.get('X-Organization-Id') ||
     (typeof req.query.organization_id === 'string' ? req.query.organization_id : null);
-  // body é explicitamente ignorado.
+  const requestedUnit = req.get('X-Unit-Id') || null;
+  // body é explicitamente ignorado — org e unit só por header/query.
 
   const [{ data: memberships, error: mErr }, { data: padmin }] = await Promise.all([
     supabase
@@ -68,6 +69,28 @@ export async function resolveTenantContext(req) {
     defaultUnitId = map?.default_unit_id ?? null;
   }
 
+  const unitIds = (membership?.membership_units || []).map((u) => u.unit_id);
+
+  // X-Unit-Id: precisa pertencer à organização selecionada. Para membro comum,
+  // precisa estar entre as unidades da membership; para platform_admin, basta
+  // pertencer à organização. Divergência -> 403 (nunca ignora silenciosamente).
+  let unitId = null;
+  if (requestedUnit) {
+    if (!organizationId) return { ok: false, code: 'unit_requires_organization', status: 409 };
+    let unitOk = unitIds.includes(requestedUnit);
+    if (!unitOk && isPlatformAdmin) {
+      const { data: u } = await supabase
+        .from('units')
+        .select('id')
+        .eq('id', requestedUnit)
+        .eq('organization_id', organizationId)
+        .maybeSingle();
+      unitOk = Boolean(u);
+    }
+    if (!unitOk) return { ok: false, code: 'unit_not_in_organization', status: 403 };
+    unitId = requestedUnit;
+  }
+
   return {
     ok: true,
     enabled: true,
@@ -75,9 +98,10 @@ export async function resolveTenantContext(req) {
     organizationId,
     doctorId, // compat legado
     defaultUnitId,
+    unitId, // unidade explicitamente selecionada e validada (ou null)
     role: membership?.role ?? (isPlatformAdmin ? 'platform_admin' : null),
     isPlatformAdmin,
-    unitIds: (membership?.membership_units || []).map((u) => u.unit_id),
+    unitIds,
     organizationIds: active.map((m) => m.organization_id),
   };
 }

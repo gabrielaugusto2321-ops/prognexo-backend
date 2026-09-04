@@ -37,6 +37,21 @@ export function makeDb(initial = {}) {
       if (/\bleads\s*!?\w*\s*\(/.test(selectStr) && row.lead_id) {
         out.leads = table('leads').find((l) => l.id === row.lead_id) || null;
       }
+      // memberships -> organizations(...) via organization_id
+      if (/\borganizations\s*\(/.test(selectStr) && row.organization_id) {
+        out.organizations = table('organizations').find((o) => o.id === row.organization_id) || null;
+      }
+      // memberships -> membership_units( units(...) ) via membership_id -> unit_id
+      if (/\bmembership_units\s*\(/.test(selectStr) && row.id) {
+        out.membership_units = table('membership_units')
+          .filter((mu) => mu.membership_id === row.id)
+          .map((mu) => ({
+            unit_id: mu.unit_id,
+            units: /units\s*\(/.test(selectStr)
+              ? table('units').find((u) => u.id === mu.unit_id) || null
+              : undefined,
+          }));
+      }
       return out;
     }
 

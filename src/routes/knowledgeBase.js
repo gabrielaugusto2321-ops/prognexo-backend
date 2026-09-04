@@ -3,14 +3,17 @@ import { supabase } from '../lib/supabase.js';
 import { requireAuth, getScopedDoctorIds } from '../middleware/auth.js';
 import { reindexarKnowledgeBaseItem } from '../lib/knowledgeChunks.js';
 import { logger } from '../lib/logger.js';
+import { attachTenantContext, tenantAllowsDoctor } from '../lib/tenantContext.js';
 
 const router = Router();
 router.use(requireAuth);
+router.use(attachTenantContext); // no-op se TENANT_CORE_ENABLED=false
 
 async function checarAcesso(req, doctorId) {
-  const scopedIds = await getScopedDoctorIds(req.user);
-  return !scopedIds || scopedIds.includes(doctorId);
+  return tenantAllowsDoctor(req, doctorId, getScopedDoctorIds);
 }
+// organization_id do contexto (nunca do body). undefined quando a flag está off.
+const orgOf = (req) => (req.tenant?.enabled && req.tenant.organizationId ? { organization_id: req.tenant.organizationId } : {});
 
 // Gera os embeddings do item (ingestão inline). Se a Voyage falhar, o
 // item já foi salvo — devolve o erro num campo à parte em vez de derrubar
@@ -51,7 +54,7 @@ router.post('/', async (req, res) => {
 
   const { data, error } = await supabase
     .from('knowledge_base')
-    .insert({ doctor_id, titulo: titulo.trim(), conteudo: conteudo.trim() })
+    .insert({ doctor_id, titulo: titulo.trim(), conteudo: conteudo.trim(), ...orgOf(req) })
     .select()
     .single();
 

@@ -36,6 +36,7 @@ import playgroundRoutes from './routes/playground.js';
 import knowledgeBaseRoutes from './routes/knowledgeBase.js';
 import bdrRoutes from './routes/bdr.js';
 import campanhasRoutes from './routes/campanhas.js';
+import tenantRoutes from './routes/tenant.js';
 
 import whatsappWebhook from './webhooks/whatsapp.js';
 import pagarmeWebhook from './webhooks/pagarme.js';
@@ -63,6 +64,7 @@ const ROUTE_MOUNTS = [
   ['/knowledge-base', knowledgeBaseRoutes],
   ['/bdr', bdrRoutes],
   ['/campanhas', campanhasRoutes],
+  ['/tenant', tenantRoutes],
 ];
 
 export function createApp() {

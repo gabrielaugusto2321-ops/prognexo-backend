@@ -4,9 +4,11 @@ import { requireAuth, getScopedDoctorIds, isScopedToOwnLeadsOnly } from '../midd
 import { sendWhatsAppMessage } from '../lib/whatsapp.js';
 import { authorizeResource } from '../lib/authz.js';
 import { CredentialVault } from '../lib/credentialVault.js';
+import { attachTenantContext, scopedDoctorIds } from '../lib/tenantContext.js';
 
 const router = Router();
 router.use(requireAuth);
+router.use(attachTenantContext); // no-op se TENANT_CORE_ENABLED=false
 
 function formatarHora(timestamp) {
   if (!timestamp) return '';
@@ -33,7 +35,7 @@ function iniciais(nome) {
 // GET /conversations?doctor_id=&lead_id=
 // Timeline de mensagens (hoje só WhatsApp), agrupada por lead — mais recente primeiro.
 router.get('/', async (req, res) => {
-  const scopedIds = await getScopedDoctorIds(req.user);
+  const scopedIds = await scopedDoctorIds(req, getScopedDoctorIds);
   const { doctor_id, lead_id } = req.query;
 
   let query = supabase
@@ -107,12 +109,20 @@ router.post('/send', async (req, res) => {
     table: 'leads',
     id: lead_id,
     requireOwnerForCloser: true,
-    select: 'id, telefone, doctor_id, sdr_responsavel_id',
+    select: 'id, telefone, doctor_id, organization_id, sdr_responsavel_id',
   });
   if (!authorization.ok) {
     return res.status(authorization.reason === 'not_found' ? 404 : 403).json({ error: authorization.reason });
   }
   const lead = authorization.row;
+
+  // FASE 2.3: com tenant core ligado, o lead precisa pertencer à organização
+  // ativa — bloqueia ANTES de enviar a mensagem (o trigger do banco é a última
+  // linha de defesa, mas não deve ser o primeiro a barrar um cross-tenant).
+  if (req.tenant?.enabled && req.tenant.organizationId && lead.organization_id &&
+      lead.organization_id !== req.tenant.organizationId) {
+    return res.status(403).json({ error: 'lead_fora_da_organizacao' });
+  }
 
   let integration;
   try {
@@ -174,6 +184,9 @@ router.post('/send', async (req, res) => {
       conteudo: texto.trim(),
       origem: 'manual',
       timestamp_msg: new Date().toISOString(),
+      // trigger trg_conversations_org valida contra leads.organization_id;
+      // o valor do contexto nunca "vence" o parent.
+      ...(req.tenant?.enabled && req.tenant.organizationId ? { organization_id: req.tenant.organizationId } : {}),
     })
     .select()
     .single();

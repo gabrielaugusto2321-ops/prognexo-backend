@@ -1,9 +1,11 @@
 import { Router } from 'express';
 import { supabase } from '../lib/supabase.js';
 import { requireAuth, getScopedDoctorIds } from '../middleware/auth.js';
+import { attachTenantContext, scopedDoctorIds } from '../lib/tenantContext.js';
 
 const router = Router();
 router.use(requireAuth);
+router.use(attachTenantContext); // no-op se TENANT_CORE_ENABLED=false
 
 // GET /patients?doctor_id=
 // Um "paciente" é qualquer lead que já teve pelo menos 1 atendimento
@@ -11,7 +13,7 @@ router.use(requireAuth);
 // (ativo/esfriando/sumiu) direto em cima do histórico, sem precisar de
 // nenhuma tabela nova.
 router.get('/', async (req, res) => {
-  const scopedIds = await getScopedDoctorIds(req.user);
+  const scopedIds = await scopedDoctorIds(req, getScopedDoctorIds);
   const { doctor_id } = req.query;
 
   if (doctor_id && scopedIds && !scopedIds.includes(doctor_id)) {

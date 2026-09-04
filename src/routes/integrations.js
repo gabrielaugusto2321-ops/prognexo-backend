@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase.js';
 import { requireAuth } from '../middleware/auth.js';
 import { exchangeCodeForToken, registerPhoneNumber, subscribeAppToWaba } from '../lib/embeddedSignup.js';
 import { CredentialVault } from '../lib/credentialVault.js';
+import { attachTenantContext } from '../lib/tenantContext.js';
 
 // Remove qualquer coluna sensível/ciphertext antes de devolver ao frontend.
 const SENSITIVE_COLS = new Set([
@@ -19,10 +20,17 @@ function stripSecrets(row) {
 
 const router = Router();
 router.use(requireAuth);
+router.use(attachTenantContext); // no-op se TENANT_CORE_ENABLED=false
 
 const GATEWAYS = ['kiwify', 'hotmart', 'ticto', 'pagarme', 'whatsapp'];
 
-async function resolveDoctorId(user, queryDoctorId) {
+async function resolveDoctorId(req, queryDoctorId) {
+  // FASE 2.3: com tenant core ligado, o doctor_id vem SEMPRE do contexto
+  // (organization_doctor_map) — nunca do query/body.
+  if (req.tenant?.enabled) {
+    return req.tenant.doctorId ?? null;
+  }
+  const user = req.user;
   if (user.role === 'doctor') {
     const { data } = await supabase.from('doctors').select('id').eq('owner_user_id', user.id).maybeSingle();
     return data?.id ?? null;
@@ -31,18 +39,19 @@ async function resolveDoctorId(user, queryDoctorId) {
   if (user.role === 'admin') return queryDoctorId ?? null;
   return null;
 }
+const orgOf = (req) => (req.tenant?.enabled && req.tenant.organizationId ? { organization_id: req.tenant.organizationId } : {});
 
 // GET /integrations?doctor_id= (obrigatório se for admin)
 // Garante que os 5 tokens existam (cria os que faltarem) e devolve todos.
 // access_token nunca volta no JSON — é write-only, só pra não vazar segredo pro frontend.
 router.get('/', async (req, res) => {
-  const doctorId = await resolveDoctorId(req.user, req.query.doctor_id);
+  const doctorId = await resolveDoctorId(req, req.query.doctor_id);
   if (!doctorId) return res.status(400).json({ error: 'doctor_id necessário' });
 
   for (const gateway of GATEWAYS) {
     await supabase
       .from('integrations')
-      .upsert({ doctor_id: doctorId, gateway }, { onConflict: 'doctor_id,gateway', ignoreDuplicates: true });
+      .upsert({ doctor_id: doctorId, gateway, ...orgOf(req) }, { onConflict: 'doctor_id,gateway', ignoreDuplicates: true });
   }
 
   const { data, error } = await supabase.from('integrations').select('*').eq('doctor_id', doctorId);
@@ -54,7 +63,7 @@ router.get('/', async (req, res) => {
 // PATCH /integrations/whatsapp — médico informa o phone_number_id e/ou o
 // access_token permanente do próprio WhatsApp (gerado no Meta for Developers).
 router.patch('/whatsapp', async (req, res) => {
-  const doctorId = await resolveDoctorId(req.user, req.body.doctor_id);
+  const doctorId = await resolveDoctorId(req, req.body.doctor_id);
   if (!doctorId) return res.status(400).json({ error: 'doctor_id necessário' });
 
   const { external_id, access_token } = req.body;
@@ -96,7 +105,7 @@ router.patch('/whatsapp', async (req, res) => {
 // Signup (o popup da Meta). Recebe o "code" do login, o waba_id e o
 // phone_number_id que o próprio fluxo devolve via postMessage no navegador.
 router.post('/whatsapp/embedded-callback', async (req, res) => {
-  const doctorId = await resolveDoctorId(req.user, req.body.doctor_id);
+  const doctorId = await resolveDoctorId(req, req.body.doctor_id);
   if (!doctorId) return res.status(400).json({ error: 'doctor_id necessário' });
 
   const { code, waba_id, phone_number_id } = req.body;
