@@ -3,8 +3,23 @@ import { supabase } from '../lib/supabase.js';
 import { env } from '../config/env.js';
 import { configuredTeamInviteEmailAdapter } from '../lib/emailAdapter.js';
 import { processOutboxBatch } from '../lib/teamInviteOutbox.js';
+import { processCampaignJobs } from '../jobs/campaignSendHandler.js';
+import { requireJobRunnerAuth } from '../lib/jobRunnerAuth.js';
 
 const router = Router();
+
+// FASE 2.8 — worker HTTP da fila de jobs de campanha. Autenticação SÓ por
+// header (Authorization: Bearer <JOB_RUNNER_SECRET> ou X-Prognexo-Job-Token),
+// timing-safe, NUNCA por query string. Disparado por um cron/scheduler
+// externo único. O claim com SKIP LOCKED garante que dois disparos
+// concorrentes nunca processam o mesmo job.
+router.post('/campaign-outbox', requireJobRunnerAuth, async (req, res) => {
+  if (env.PERSISTENT_JOB_QUEUE_ENABLED !== 'true' || env.CAMPAIGN_JOB_QUEUE_ENABLED !== 'true') {
+    return res.status(404).json({ error: 'not_found' });
+  }
+  const summary = await processCampaignJobs({ workerId: `campaign-http-${process.pid}-${Date.now()}`, batchSize: 20, log: req.log });
+  return res.json(summary);
+});
 
 router.post('/team-invite-outbox', async (req, res) => {
   if (req.query.secret !== process.env.CRON_SECRET) return res.status(401).json({ error: 'Token inválido' });

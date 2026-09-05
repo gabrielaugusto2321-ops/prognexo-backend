@@ -36,7 +36,14 @@ let _state = null;
 
 export function loadCryptoState(source = env) {
   const enabled = source.TOKEN_ENCRYPTION_ENABLED === 'true';
-  const inviteCipherEnabled = source.TEAM_INVITE_OUTBOX_ENABLED === 'true' || source.TEAM_INVITE_EMAIL_DELIVERY_ENABLED === 'true';
+  // FASE 2.7 (convites) e FASE 2.8 (fila de jobs) reaproveitam o keyring AES
+  // desta camada para cifrar payloads sensíveis, mesmo com
+  // TOKEN_ENCRYPTION_ENABLED=false. `enabled` (usado pelos helpers de
+  // integrations/google_tokens) NUNCA reflete essas flags — só o keyring/
+  // activeKey passam a ser materializados. Ver comentário no return.
+  const inviteCipherEnabled = source.TEAM_INVITE_OUTBOX_ENABLED === 'true'
+    || source.TEAM_INVITE_EMAIL_DELIVERY_ENABLED === 'true'
+    || source.PERSISTENT_JOB_QUEUE_ENABLED === 'true';
   const dualWrite = source.TOKEN_ENCRYPTION_DUAL_WRITE === 'true';
   const allowPlaintextRead = source.TOKEN_ENCRYPTION_ALLOW_PLAINTEXT_READ === 'true';
 

@@ -34,6 +34,11 @@ const schema = z.object({
   VOYAGE_API_KEY: optionalSecret,
   RESEND_API_KEY: optionalSecret,
   CRON_SECRET: optionalSecret,
+  // FASE 2.8 — autenticação do worker de fila de jobs. SÓ por header
+  // (Authorization: Bearer <token> ou X-Prognexo-Job-Token), NUNCA query
+  // string. Comparação timing-safe. Exigido quando PERSISTENT_JOB_QUEUE_ENABLED
+  // está ligado (ver validatePersistentJobs).
+  JOB_RUNNER_SECRET: optionalSecret,
 
   // Frontend / CORS
   FRONTEND_URL: z.string().url().optional(),
@@ -71,6 +76,16 @@ const schema = z.object({
   // reaproveitado diretamente, mesmo quando TOKEN_ENCRYPTION_ENABLED=false.
   TEAM_INVITE_OUTBOX_ENABLED: bool.default('false'),
   TEAM_INVITE_EMAIL_DELIVERY_ENABLED: bool.default('false'),
+
+  // FASE 2.8 — fila de jobs persistente (Postgres-only) + quotas de custo.
+  // Todas nascem false. CAMPAIGN_JOB_QUEUE exige PERSISTENT_JOB_QUEUE; em
+  // produção/staging CAMPAIGN_JOB_QUEUE também exige USAGE_QUOTAS. Ligar
+  // PERSISTENT_JOB_QUEUE reaproveita o keyring AES da FASE 2.2 (payload de
+  // job sensível é cifrado com o mesmo TokenCipher), mesmo com
+  // TOKEN_ENCRYPTION_ENABLED=false. Ver validateTeamInviteOutbox como padrão.
+  PERSISTENT_JOB_QUEUE_ENABLED: bool.default('false'),
+  USAGE_QUOTAS_ENABLED: bool.default('false'),
+  CAMPAIGN_JOB_QUEUE_ENABLED: bool.default('false'),
 
   // FASE 2.2 — criptografia de tokens/credenciais em repouso.
   //   ENABLED=false  -> comportamento atual (plaintext); a camada CredentialVault
@@ -274,6 +289,53 @@ export function validateTeamInviteOutbox(env, appEnv) {
   return { problems };
 }
 
+export function validatePersistentJobs(env, appEnv) {
+  const queue = env.PERSISTENT_JOB_QUEUE_ENABLED === 'true';
+  const quotas = env.USAGE_QUOTAS_ENABLED === 'true';
+  const campaigns = env.CAMPAIGN_JOB_QUEUE_ENABLED === 'true';
+  const problems = [];
+
+  if (campaigns && !queue) problems.push('CAMPAIGN_JOB_QUEUE_ENABLED=true exige PERSISTENT_JOB_QUEUE_ENABLED=true');
+  if (campaigns && (appEnv === 'production' || appEnv === 'staging') && !quotas) {
+    problems.push('CAMPAIGN_JOB_QUEUE_ENABLED=true exige USAGE_QUOTAS_ENABLED=true em produção/staging (nunca disparar volume pago sem quota)');
+  }
+
+  // Payload de job classificado como sensível é cifrado com o mesmo TokenCipher
+  // da FASE 2.2 — precisa do keyring/active key válidos assim que a fila liga,
+  // independente de TOKEN_ENCRYPTION_ENABLED.
+  if (queue) {
+    let keyring;
+    try { keyring = parseKeyring(env.TOKEN_ENCRYPTION_KEYRING); }
+    catch (err) { problems.push(err.message); }
+    if (!env.TOKEN_ENCRYPTION_ACTIVE_KEY) {
+      problems.push('TOKEN_ENCRYPTION_ACTIVE_KEY ausente para a fila de jobs persistente');
+    } else if (keyring && !keyring.has(env.TOKEN_ENCRYPTION_ACTIVE_KEY)) {
+      problems.push(`TOKEN_ENCRYPTION_ACTIVE_KEY "${env.TOKEN_ENCRYPTION_ACTIVE_KEY}" não está no keyring`);
+    }
+    if (!env.JOB_RUNNER_SECRET) {
+      problems.push('JOB_RUNNER_SECRET ausente — o worker da fila só autentica por header e exige esse segredo com PERSISTENT_JOB_QUEUE_ENABLED=true');
+    }
+  }
+
+  // Múltiplas instâncias: a fila em Postgres JÁ é o store compartilhado —
+  // ao contrário do rate-limit em memória (assertRateLimitStoreReady), isso
+  // NÃO derruba o boot. Mas o worker HTTP (`/jobs/campaign-outbox`) precisa
+  // ser disparado por um cron externo único, nunca por N instâncias ao mesmo
+  // tempo sem coordenação — o claim com SKIP LOCKED torna isso seguro
+  // (dois workers não pegam o mesmo job), então também não é erro. Nada a
+  // fazer aqui além de documentar.
+
+  // NUNCA chamar a Meta de verdade em teste: essa proteção NÃO vive nesta
+  // flag (a flag só faz a rota enfileirar jobs — inofensivo, ficam numa
+  // tabela). A garantia real é dupla: (1) `src/lib/whatsapp.js` é sempre
+  // `vi.mock`ado nas suítes; (2) `processCampaignJobs`/`handleCampaignSendJob`
+  // recebem o `send` por injeção de dependência, e os testes passam um fake.
+  // Um env guard aqui só daria falsa sensação de segurança e impediria
+  // testar o caminho novo com a flag ligada.
+
+  return { problems };
+}
+
 export function validateEnv(source = process.env) {
   const parsed = schema.safeParse(source);
   if (!parsed.success) {
@@ -299,6 +361,11 @@ export function validateEnv(source = process.env) {
   const inviteOutbox = validateTeamInviteOutbox(env, appEnv);
   if (inviteOutbox.problems.length) {
     throw new Error(`Invalid team-invite-outbox configuration:\n- ${inviteOutbox.problems.join('\n- ')}`);
+  }
+
+  const persistentJobs = validatePersistentJobs(env, appEnv);
+  if (persistentJobs.problems.length) {
+    throw new Error(`Invalid persistent-jobs configuration:\n- ${persistentJobs.problems.join('\n- ')}`);
   }
 
   // Variáveis obrigatórias por ambiente lógico.

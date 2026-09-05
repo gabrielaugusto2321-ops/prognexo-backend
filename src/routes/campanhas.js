@@ -4,6 +4,8 @@ import { requireAuth, getScopedDoctorIds } from '../middleware/auth.js';
 import { sendWhatsAppMessage } from '../lib/whatsapp.js';
 import { attachTenantContext, tenantAllowsDoctor } from '../lib/tenantContext.js';
 import { CredentialVault } from '../lib/credentialVault.js';
+import { env } from '../config/env.js';
+import { jobQueue } from '../lib/jobQueue.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -157,13 +159,30 @@ async function processarEnvioCampanha(campanha, integration, accessToken, log) {
 // Anti-duplicação (RACE01):
 //  - Aquisição ATÔMICA: só UMA requisição muda 'rascunho'|'erro' -> 'processando'.
 //    Uma segunda requisição simultânea recebe 409 e não envia nada.
-//  - O envio roda destacado; a rota responde 202 na hora.
-//  - Idempotência por (campanha, lead) via `campanha_envios` (migration 0006).
-//  - Falha deixa a campanha em 'erro', que pode ser re-disparada com segurança.
+//
+// FASE 2.8 (CAMPAIGN_JOB_QUEUE_ENABLED=true):
+//  - BLOQUEADOR 1 — o 202 SÓ sai depois de UM job `campaign.dispatch`
+//    persistido de forma durável e idempotente (não há janela entre o 202 e
+//    a primeira persistência). O handler `campaign.dispatch` pagina os leads
+//    e enfileira os `campaign.send_message` (retomável após reinício: as
+//    operações são idempotentes — `campanha_envios` unique + idempotency_key
+//    do job). Nenhum job de destinatário é criado dentro da request.
+//  - BLOQUEADOR 3 — com a flag ligada, campanha SEM organization_id falha
+//    fechada (409 tenant_backfill_required) ANTES de qualquer WhatsApp;
+//    NUNCA cai no fluxo legado (que não passa por fila nem quota).
+//  - flag OFF: fluxo legado 100% preservado (loop destacado, 202 imediato).
 router.post('/:id/enviar', async (req, res) => {
   const { data: campanhaBase } = await supabase.from('campanhas').select('*').eq('id', req.params.id).single();
   if (!campanhaBase) return res.status(404).json({ error: 'Campanha não encontrada' });
   if (!(await checarAcesso(req, campanhaBase.doctor_id))) return res.status(403).json({ error: 'Sem acesso' });
+
+  const queueMode = env.CAMPAIGN_JOB_QUEUE_ENABLED === 'true';
+
+  // BLOQUEADOR 3: fila ligada exige organização — sem fallback pro legado.
+  if (queueMode && !campanhaBase.organization_id) {
+    req.log?.warn({ campanhaId: campanhaBase.id, code: 'tenant_backfill_required' }, 'Campaign send blocked: no organization');
+    return res.status(409).json({ error: 'tenant_backfill_required' });
+  }
 
   let integration;
   try {
@@ -207,9 +226,28 @@ router.post('/:id/enviar', async (req, res) => {
     return res.status(409).json({ error: 'campanha_em_processamento_ou_ja_enviada' });
   }
 
-  // Responde já; o envio continua em background.
-  res.status(202).json({ id: campanha.id, status: 'processando' });
+  if (queueMode) {
+    // BLOQUEADOR 1: o 202 só sai DEPOIS que este job existe no banco. A
+    // idempotency_key inclui `processando_desde` (novo a cada disparo) — um
+    // re-disparo da mesma campanha gera um dispatch NOVO, não reaproveita o
+    // job já completado de um disparo anterior. Duas requisições concorrentes
+    // não chegam aqui juntas (a aquisição atômica acima já deu 409 pra uma).
+    try {
+      const dispatch = await jobQueue.enqueue(
+        'campaign.dispatch',
+        { campaignId: campanha.id },
+        { organizationId: campanha.organization_id, idempotencyKey: `dispatch:${campanha.id}:${campanha.processando_desde}` },
+      );
+      return res.status(202).json({ id: campanha.id, job_id: dispatch.id, status: 'processando' });
+    } catch (err) {
+      await supabase.from('campanhas').update({ status: 'erro', processando_desde: null }).eq('id', campanha.id).then(() => {}, () => {});
+      req.log?.error({ err: { code: err?.code || 'dispatch_enqueue_failed' }, campanhaId: campanha.id }, 'Campaign dispatch enqueue failed');
+      return res.status(500).json({ error: 'internal_error', requestId: req.id });
+    }
+  }
 
+  // --- legado (flag OFF): 202 imediato + loop destacado, inalterado ---
+  res.status(202).json({ id: campanha.id, status: 'processando' });
   processarEnvioCampanha(campanha, integration, accessToken, req.log);
 });
 

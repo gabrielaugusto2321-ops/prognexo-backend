@@ -88,4 +88,35 @@ describe('env — combinações perigosas derrubam o boot', () => {
     const key = Buffer.alloc(32, 2).toString('base64');
     expect(() => validateEnv({ ...base, TEAM_INVITE_OUTBOX_ENABLED: 'true', TOKEN_ENCRYPTION_ENABLED: 'false', TOKEN_ENCRYPTION_KEYRING: JSON.stringify({ v1: key }), TOKEN_ENCRYPTION_ACTIVE_KEY: 'v1' })).not.toThrow();
   });
+
+  // FASE 2.8 — fila de jobs persistente + quotas
+  const jobKeyring = () => {
+    const key = Buffer.alloc(32, 4).toString('base64');
+    return { TOKEN_ENCRYPTION_KEYRING: JSON.stringify({ v1: key }), TOKEN_ENCRYPTION_ACTIVE_KEY: 'v1', JOB_RUNNER_SECRET: 'job-runner-secret-value' };
+  };
+
+  it('CAMPAIGN_JOB_QUEUE_ENABLED exige PERSISTENT_JOB_QUEUE_ENABLED', () => {
+    expect(() => validateEnv({ ...base, CAMPAIGN_JOB_QUEUE_ENABLED: 'true', USAGE_QUOTAS_ENABLED: 'true', ...jobKeyring() }))
+      .toThrow(/CAMPAIGN_JOB_QUEUE_ENABLED=true exige PERSISTENT_JOB_QUEUE_ENABLED/);
+  });
+
+  it('PERSISTENT_JOB_QUEUE_ENABLED exige keyring/active key (payload sensível é cifrado)', () => {
+    expect(() => validateEnv({ ...base, PERSISTENT_JOB_QUEUE_ENABLED: 'true' }))
+      .toThrow(/TOKEN_ENCRYPTION_KEYRING|TOKEN_ENCRYPTION_ACTIVE_KEY/);
+  });
+
+  it('PERSISTENT_JOB_QUEUE_ENABLED exige JOB_RUNNER_SECRET (worker só autentica por header)', () => {
+    const key = Buffer.alloc(32, 4).toString('base64');
+    expect(() => validateEnv({ ...base, PERSISTENT_JOB_QUEUE_ENABLED: 'true', TOKEN_ENCRYPTION_KEYRING: JSON.stringify({ v1: key }), TOKEN_ENCRYPTION_ACTIVE_KEY: 'v1' }))
+      .toThrow(/JOB_RUNNER_SECRET/);
+  });
+
+  it('em produção, CAMPAIGN_JOB_QUEUE_ENABLED exige USAGE_QUOTAS_ENABLED', () => {
+    expect(() => validateEnv({ ...base, PERSISTENT_JOB_QUEUE_ENABLED: 'true', CAMPAIGN_JOB_QUEUE_ENABLED: 'true', USAGE_QUOTAS_ENABLED: 'false', ...jobKeyring() }))
+      .toThrow(/exige USAGE_QUOTAS_ENABLED=true em produção/);
+  });
+
+  it('fila de jobs configurada corretamente em produção → OK, sem ligar a criptografia legada', () => {
+    expect(() => validateEnv({ ...base, PERSISTENT_JOB_QUEUE_ENABLED: 'true', USAGE_QUOTAS_ENABLED: 'true', CAMPAIGN_JOB_QUEUE_ENABLED: 'true', TOKEN_ENCRYPTION_ENABLED: 'false', ...jobKeyring() })).not.toThrow();
+  });
 });
