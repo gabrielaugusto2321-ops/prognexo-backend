@@ -68,12 +68,6 @@ function rpcErrorResponse(res, req, err) {
   return res.status(500).json({ error: 'internal_error', requestId: req.id });
 }
 
-const addSchema = z.object({
-  nome: z.string().trim().min(1),
-  email: z.string().trim().email(),
-  role: z.enum(MEMBERSHIP_ROLES),
-  unit_ids: z.array(z.string().uuid()).max(50).optional().default([]),
-}).strict();
 const roleSchema = z.object({ role: z.enum(MEMBERSHIP_ROLES) }).strict();
 const statusSchema = z.object({ status: z.enum(['active', 'suspended']) }).strict();
 const unitsSchema = z.object({ unit_ids: z.array(z.string().uuid()).max(50) }).strict();
@@ -209,53 +203,30 @@ router.patch('/distribuicao', requireTeamManager, async (req, res) => {
 
 // ===========================================================================
 // POST /team — convida/adiciona um membro.
-// Legado: cria closer vinculado a doctor_id. Sob a flag: cria membership com
-// o papel pedido (validado pelo servidor) + unidades, via RPC transacional.
-// Body NUNCA carrega organization_id/doctor_id/role do ator/user_id — só os
-// dados do NOVO membro.
+//
+// Legado (só quando TEAM_MEMBERSHIPS_ENABLED=false, compatibilidade
+// temporária): cria closer vinculado a doctor_id, via inviteUserByEmail
+// (dispara e-mail imediatamente — comportamento antigo, aceito só até o
+// cutover completo).
+//
+// FASE 2.7 — BLOQUEADOR DE SEGURANÇA corrigido: com TEAM_MEMBERSHIPS_ENABLED
+// =true, esta rota NUNCA cria usuário nem chama inviteUserByEmail — nem
+// mesmo se TEAM_INVITE_OUTBOX_ENABLED estiver desligado (nesse caso não há
+// NENHUM caminho de convite disponível, nem este nem /team/invitations —
+// erro seguro, sem criar nada, em vez de cair pro fluxo legado inseguro). A
+// checagem é sobre a variável de ambiente diretamente (não sobre
+// membershipsOn(req), que também depende do tenant context ter resolvido
+// para ESTA requisição) — o cutover não pode ficar condicionado a um
+// detalhe de contexto por requisição; ou está ligado pra organização inteira
+// ou não está. A única porta de criação de convite quando o cutover está
+// ligado é POST /team/invitations (outbox persistente, FASE 2.7).
 // ===========================================================================
 router.post('/', teamMutationLimiter, requireTeamManager, async (req, res) => {
-  if (membershipsOn(req)) {
-    const parsed = addSchema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: 'invalid_body' });
-    const { nome, email, role, unit_ids } = parsed.data;
-    const organizationId = req.tenant.organizationId;
-
-    const { data: authUser, error: authError } = await supabase.auth.admin.inviteUserByEmail(email);
-    if (authError) { req.log?.error({ err: authError }, 'Team invite failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
-
-    // users.role é travado em admin/doctor/closer (schema legado) — 'closer' é
-    // o valor menos privilegiado para qualquer papel novo. Não concede, por si
-    // só, nenhum acesso: sem linha em user_doctor_access, o legado não enxerga
-    // este usuário em nada.
-    const { error: userError } = await supabase.from('users').insert({ id: authUser.user.id, nome, email, role: 'closer' });
-    if (userError) { req.log?.error({ err: userError }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
-
-    const { data, error: rpcError } = await supabase.rpc('team_member_add', {
-      p_organization_id: organizationId,
-      p_actor_user_id: req.user.id,
-      p_target_user_id: authUser.user.id,
-      p_role: role,
-      p_unit_ids: unit_ids,
-    });
-    if (rpcError) {
-      // A RPC negou (papel/unidade/conflito) — não deixa conta órfã pra trás
-      // (a criação em Auth/users não é transacional com a RPC; melhor
-      // esforço de limpeza, nunca bloqueia a resposta de erro por causa disso).
-      await supabase.from('users').delete().eq('id', authUser.user.id).then(
-        (r) => { if (r?.error) req.log?.error({ err: r.error }, 'team invite cleanup (users) failed'); },
-        (err) => req.log?.error({ err }, 'team invite cleanup (users) failed')
-      );
-      await supabase.auth.admin.deleteUser(authUser.user.id).catch(
-        (err) => req.log?.error({ err }, 'team invite cleanup (auth) failed')
-      );
-      return rpcErrorResponse(res, req, rpcError);
-    }
-
-    return res.status(201).json({ id: authUser.user.id, nome, email, role: data.role, status: data.status });
+  if (env.TEAM_MEMBERSHIPS_ENABLED === 'true') {
+    return res.status(400).json({ error: 'use_team_invitations_endpoint' });
   }
 
-  // --- legado (inalterado) ---
+  // --- legado (inalterado, só roda com TEAM_MEMBERSHIPS_ENABLED=false) ---
   const { doctor_id, nome, email } = req.body;
   const scopedIds = await getScopedDoctorIds(req.user);
 

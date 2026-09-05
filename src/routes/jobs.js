@@ -1,7 +1,29 @@
 import { Router } from 'express';
 import { supabase } from '../lib/supabase.js';
+import { env } from '../config/env.js';
+import { configuredTeamInviteEmailAdapter } from '../lib/emailAdapter.js';
+import { processOutboxBatch } from '../lib/teamInviteOutbox.js';
 
 const router = Router();
+
+router.post('/team-invite-outbox', async (req, res) => {
+  if (req.query.secret !== process.env.CRON_SECRET) return res.status(401).json({ error: 'Token inválido' });
+  if (env.TEAM_INVITE_OUTBOX_ENABLED !== 'true') return res.status(404).json({ error: 'not_found' });
+  if ((env.APP_ENV === 'production' || env.APP_ENV === 'staging') && env.TEAM_INVITE_EMAIL_DELIVERY_ENABLED !== 'true') {
+    return res.status(503).json({ error: 'email_delivery_disabled' });
+  }
+  // Best-effort: marca convites 'queued'/'sent' vencidos como 'expired' antes
+  // de processar o outbox. Nunca bloqueia o processamento se falhar (a
+  // garantia de segurança real — convite expirado não é aceito — já vive em
+  // team_invitation_accept, independente desta varredura).
+  const swept = await supabase.rpc('team_invitation_sweep_expired').catch((err) => { req.log?.error({ err }, 'invitation expiry sweep failed'); return { data: null }; });
+  const summary = await processOutboxBatch({
+    workerId: `http-${process.pid}-${Date.now()}`,
+    batchSize: 20,
+    adapter: configuredTeamInviteEmailAdapter(),
+  });
+  return res.json({ ...summary, expired: swept.data ?? null });
+});
 
 // POST /jobs/limpar-leads-esquecidos?secret=TOKEN
 // NÃO exige login — é chamada por um serviço externo de cron (cron-job.org,

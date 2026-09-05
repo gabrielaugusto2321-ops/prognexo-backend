@@ -20,6 +20,7 @@ import leadsRoutes from './routes/leads.js';
 import dealsRoutes from './routes/deals.js';
 import dashboardRoutes from './routes/dashboard.js';
 import teamRoutes from './routes/team.js';
+import teamInvitationRoutes from './routes/teamInvitations.js';
 import doctorsRoutes from './routes/doctors.js';
 import signupRoutes from './routes/signup.js';
 import activationRoutes from './routes/activation.js';
@@ -49,6 +50,7 @@ const ROUTE_MOUNTS = [
   ['/leads', leadsRoutes],
   ['/deals', dealsRoutes],
   ['/dashboard', dashboardRoutes],
+  ['/team/invitations', teamInvitationRoutes],
   ['/team', teamRoutes],
   ['/doctors', doctorsRoutes],
   ['/signup', signupRoutes],

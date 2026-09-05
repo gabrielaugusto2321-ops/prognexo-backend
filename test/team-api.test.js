@@ -92,82 +92,63 @@ describe('POST/PATCH/DELETE /team — flag ligada (TEAM_MEMBERSHIPS_ENABLED=true
     expect((await request(a).get('/team').set(bearer('viewerA')).set(org(ORG_A))).status).toBe(403);
   });
 
-  it('owner adiciona membro com papel novo (ex.: financial) -> 201, sem organization_id/role do ator no body', async () => {
+  // FASE 2.7 — BLOQUEADOR DE SEGURANÇA (revisão pós-entrega): com
+  // TEAM_MEMBERSHIPS_ENABLED=true, POST /team NUNCA MAIS cria membership nem
+  // chama inviteUserByEmail — a única porta de convite passou a ser
+  // POST /team/invitations (outbox persistente, ver test/team-invitations-api.test.js
+  // pra hierarquia/conta-órfã/idempotência desse fluxo novo). Os testes
+  // abaixo substituem os que antes verificavam a criação bem-sucedida por
+  // aqui — esse caminho foi removido de propósito, não é uma regressão.
+  it('owner tentando adicionar membro com papel novo (ex.: financial) -> 400, endpoint bloqueado, nada criado', async () => {
     const a = await app('true', 'true');
+    const spy = vi.spyOn(db.client.auth.admin, 'inviteUserByEmail');
     const res = await request(a).post('/team').set(bearer('ownerA')).set(org(ORG_A))
       .send({ nome: 'Novo Financeiro', email: 'fin@x.com', role: 'financial' });
-    expect(res.status).toBe(201);
-    expect(res.body.role).toBe('financial');
-    // não vira closer na ponte legada (papel novo não tem equivalente)
-    expect(db.tables.user_doctor_access.some((r) => r.user_id === res.body.id)).toBe(false);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('use_team_invitations_endpoint');
+    expect(spy).not.toHaveBeenCalled();
+    expect(db.tables.users.some((u) => u.email === 'fin@x.com')).toBe(false);
   });
 
-  it('owner adiciona membro com papel closer -> ganha ponte user_doctor_access', async () => {
+  it('owner tentando adicionar membro com papel closer -> 400, endpoint bloqueado, sem criar ponte user_doctor_access', async () => {
     const a = await app('true', 'true');
+    const antes = db.tables.user_doctor_access.length;
     const res = await request(a).post('/team').set(bearer('ownerA')).set(org(ORG_A))
       .send({ nome: 'Novo Closer', email: 'closer2@x.com', role: 'closer' });
-    expect(res.status).toBe(201);
-    expect(db.tables.user_doctor_access.some((r) => r.user_id === res.body.id && r.doctor_id === DOC_A)).toBe(true);
-  });
-
-  it('body com organization_id/role do ator/user_id -> 400 (schema strict)', async () => {
-    const a = await app('true', 'true');
-    const res = await request(a).post('/team').set(bearer('ownerA')).set(org(ORG_A))
-      .send({ nome: 'X', email: 'x@x.com', role: 'viewer', organization_id: ORG_B });
     expect(res.status).toBe(400);
+    expect(res.body.error).toBe('use_team_invitations_endpoint');
+    expect(db.tables.user_doctor_access.length).toBe(antes); // nada novo foi criado
   });
 
-  it('admin NÃO cria owner nem admin nem platform_admin -> 403', async () => {
+  it('bloqueio vale pra QUALQUER papel/corpo — admin tentando escalonar (owner/admin/platform_admin) também é 400, nunca chega a 403 da RPC', async () => {
     const a = await app('true', 'true');
-    for (const role of ['organization_owner', 'organization_admin', 'platform_admin']) {
+    const spy = vi.spyOn(db.client.auth.admin, 'inviteUserByEmail');
+    for (const role of ['organization_owner', 'organization_admin', 'platform_admin', 'viewer']) {
       const res = await request(a).post('/team').set(bearer('adminA')).set(org(ORG_A))
         .send({ nome: 'X', email: `x-${role}@x.com`, role });
-      expect([400, 403]).toContain(res.status); // platform_admin rejeitado no schema (400) ou na RPC (403)
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('use_team_invitations_endpoint');
+    }
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('bloqueio independe do corpo enviado (body vazio, corpo malformado, doctor_id legado misturado) — sempre 400 antes de qualquer validação de schema', async () => {
+    const a = await app('true', 'true');
+    for (const body of [{}, { doctor_id: DOC_A, nome: 'X', email: 'y@x.com' }, { role: 'viewer' }]) {
+      const res = await request(a).post('/team').set(bearer('ownerA')).set(org(ORG_A)).send(body);
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('use_team_invitations_endpoint');
     }
   });
 
-  it('admin cria closer/viewer normalmente -> 201', async () => {
+  it('CONTA ÓRFÃ deixou de ser possível por ESTE caminho: nenhum Auth user é criado, então não há o que limpar nem o que ficar órfão', async () => {
     const a = await app('true', 'true');
-    const res = await request(a).post('/team').set(bearer('adminA')).set(org(ORG_A))
-      .send({ nome: 'X', email: 'x2@x.com', role: 'viewer' });
-    expect(res.status).toBe(201);
-  });
-
-  it('POST /team: RPC nega (admin tentando criar owner) -> 403 e NENHUMA conta órfã fica pra trás', async () => {
-    const a = await app('true', 'true');
-    const email = 'orfao@x.com';
+    const email = 'nao-cria-mais@x.com';
     const res = await request(a).post('/team').set(bearer('adminA')).set(org(ORG_A))
       .send({ nome: 'Tentativa', email, role: 'organization_owner' });
-    expect(res.status).toBe(403);
-    // o usuário criado no Auth/`users` antes da RPC foi limpo (best-effort)
+    expect(res.status).toBe(400);
     expect(db.tables.users.some((u) => u.email === email)).toBe(false);
-    expect(db.client.auth.admin.deleteUser).toHaveBeenCalled();
-  });
-
-  it('CONTA ÓRFÃ — mesmo se a limpeza compensatória (Auth+users) também falhar, a resposta continua 403 e não trava', async () => {
-    const a = await app('true', 'true');
-    const email = 'orfao-cleanup-falhou@x.com';
-    db.client.auth.admin.deleteUser.mockRejectedValueOnce(new Error('auth indisponível'));
-    // força a segunda etapa (insert em users) a "funcionar" mas a limpeza de
-    // users a falhar também, simulando o pior caso: nada da compensação funciona.
-    const origFrom = db.client.from;
-    let usersDeleteCalled = false;
-    db.client.from = (name) => {
-      const q = origFrom(name);
-      if (name === 'users') {
-        const origDelete = q.delete.bind(q);
-        q.delete = (...args) => { usersDeleteCalled = true; return { eq: () => Promise.reject(new Error('db indisponível')) }; };
-        return q;
-      }
-      return q;
-    };
-    const res = await request(a).post('/team').set(bearer('adminA')).set(org(ORG_A))
-      .send({ nome: 'Tentativa2', email, role: 'organization_owner' });
-    db.client.from = origFrom;
-    expect(res.status).toBe(403); // a resposta de erro da RPC não fica escondida atrás da falha de cleanup
-    expect(usersDeleteCalled).toBe(true); // tentou limpar
-    // a conta pode ter ficado órfã (cleanup falhou nas duas frentes) — é
-    // exatamente esse cenário que o teste abaixo prova ser inofensivo.
+    expect(db.client.auth.admin.deleteUser).not.toHaveBeenCalled(); // nem chega a precisar tentar limpar
   });
 
   it('CONTA ÓRFÃ — usuário sem NENHUMA membership (ativo=true) NÃO acessa nenhum tenant (403 no_active_membership)', async () => {

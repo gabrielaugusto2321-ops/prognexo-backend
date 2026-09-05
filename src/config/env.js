@@ -32,6 +32,7 @@ const schema = z.object({
   META_SYSTEM_USER_TOKEN: optionalSecret,
   WHATSAPP_VERIFY_TOKEN: optionalSecret,
   VOYAGE_API_KEY: optionalSecret,
+  RESEND_API_KEY: optionalSecret,
   CRON_SECRET: optionalSecret,
 
   // Frontend / CORS
@@ -64,6 +65,12 @@ const schema = z.object({
   // ponte só para role='closer'. Sem fallback silencioso: divergência que
   // possa afetar autorização retorna erro, nunca decide sozinha.
   TEAM_MEMBERSHIPS_ENABLED: bool.default('false'),
+
+  // FASE 2.7 — entrega durável de convites. Ambas começam desligadas.
+  // DELIVERY nunca pode existir sem OUTBOX; o keyring AES da FASE 2.2 é
+  // reaproveitado diretamente, mesmo quando TOKEN_ENCRYPTION_ENABLED=false.
+  TEAM_INVITE_OUTBOX_ENABLED: bool.default('false'),
+  TEAM_INVITE_EMAIL_DELIVERY_ENABLED: bool.default('false'),
 
   // FASE 2.2 — criptografia de tokens/credenciais em repouso.
   //   ENABLED=false  -> comportamento atual (plaintext); a camada CredentialVault
@@ -241,6 +248,32 @@ function validateTokenEncryption(env, appEnv) {
   return { problems, warnings };
 }
 
+export function validateTeamInviteOutbox(env, appEnv) {
+  const outbox = env.TEAM_INVITE_OUTBOX_ENABLED === 'true';
+  const delivery = env.TEAM_INVITE_EMAIL_DELIVERY_ENABLED === 'true';
+  const problems = [];
+  let keyring;
+  if (delivery && !outbox) problems.push('TEAM_INVITE_EMAIL_DELIVERY_ENABLED=true exige TEAM_INVITE_OUTBOX_ENABLED=true');
+  // O outbox sempre persiste action_link cifrado; portanto até o adapter fake
+  // precisa de material criptográfico válido quando o recurso está ligado.
+  if (outbox || delivery) {
+    try { keyring = parseKeyring(env.TOKEN_ENCRYPTION_KEYRING); }
+    catch (err) { problems.push(err.message); }
+    if (!env.TOKEN_ENCRYPTION_ACTIVE_KEY) {
+      problems.push('TOKEN_ENCRYPTION_ACTIVE_KEY ausente para team invite outbox');
+    } else if (keyring && !keyring.has(env.TOKEN_ENCRYPTION_ACTIVE_KEY)) {
+      problems.push(`TOKEN_ENCRYPTION_ACTIVE_KEY "${env.TOKEN_ENCRYPTION_ACTIVE_KEY}" não está no keyring`);
+    }
+  }
+  if (delivery && !env.RESEND_API_KEY) problems.push('RESEND_API_KEY ausente com entrega de convites habilitada');
+  // `appEnv` fica sem uso condicional aqui de propósito: qualquer ambiente
+  // (não só produção/staging) derruba o boot com config incompleta — mesmo
+  // padrão não-condicional de `validateTokenEncryption`, para nunca deixar
+  // dev "funcionar por acidente" com uma configuração que quebraria em prod.
+  void appEnv;
+  return { problems };
+}
+
 export function validateEnv(source = process.env) {
   const parsed = schema.safeParse(source);
   if (!parsed.success) {
@@ -261,6 +294,11 @@ export function validateEnv(source = process.env) {
   }
   for (const w of tokenEnc.warnings) {
     process.stderr.write(`[env] AVISO: ${w}\n`);
+  }
+
+  const inviteOutbox = validateTeamInviteOutbox(env, appEnv);
+  if (inviteOutbox.problems.length) {
+    throw new Error(`Invalid team-invite-outbox configuration:\n- ${inviteOutbox.problems.join('\n- ')}`);
   }
 
   // Variáveis obrigatórias por ambiente lógico.

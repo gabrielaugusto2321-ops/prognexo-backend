@@ -36,10 +36,11 @@ let _state = null;
 
 export function loadCryptoState(source = env) {
   const enabled = source.TOKEN_ENCRYPTION_ENABLED === 'true';
+  const inviteCipherEnabled = source.TEAM_INVITE_OUTBOX_ENABLED === 'true' || source.TEAM_INVITE_EMAIL_DELIVERY_ENABLED === 'true';
   const dualWrite = source.TOKEN_ENCRYPTION_DUAL_WRITE === 'true';
   const allowPlaintextRead = source.TOKEN_ENCRYPTION_ALLOW_PLAINTEXT_READ === 'true';
 
-  if (!enabled) {
+  if (!enabled && !inviteCipherEnabled) {
     return { enabled: false, dualWrite: false, allowPlaintextRead, keyring: null, activeKey: null, hmacKey: null };
   }
   const keyring = parseKeyring(source.TOKEN_ENCRYPTION_KEYRING);
@@ -47,14 +48,18 @@ export function loadCryptoState(source = env) {
   if (!activeKey || !keyring.has(activeKey)) {
     throw new Error('CredentialVault: TOKEN_ENCRYPTION_ACTIVE_KEY inválida para o keyring');
   }
-  const hmacKey = Buffer.from(
-    String(source.TOKEN_LOOKUP_HMAC_KEY).replace(/-/g, '+').replace(/_/g, '/'),
-    'base64'
-  );
-  if (hmacKey.length < KEY_BYTES) {
-    throw new Error('CredentialVault: TOKEN_LOOKUP_HMAC_KEY com menos de 32 bytes');
-  }
-  return { enabled: true, dualWrite, allowPlaintextRead, keyring, activeKey, hmacKey };
+  const hmacKey = enabled ? Buffer.from(
+    String(source.TOKEN_LOOKUP_HMAC_KEY).replace(/-/g, '+').replace(/_/g, '/'), 'base64'
+  ) : null;
+  if (enabled && hmacKey.length < KEY_BYTES) throw new Error('CredentialVault: TOKEN_LOOKUP_HMAC_KEY com menos de 32 bytes');
+  // `enabled` aqui reflete SÓ TOKEN_ENCRYPTION_ENABLED (FASE 2.2) — nunca
+  // `inviteCipherEnabled`. Ligar o outbox de convites (FASE 2.7) precisa do
+  // keyring/activeKey disponíveis (populados acima), mas NÃO pode virar
+  // `true` o `enabled` que os helpers de integrations/google_tokens usam
+  // para decidir se cifram — senão ligar uma flag de convite mudaria, sem
+  // relação nenhuma, o comportamento de credenciais de integração/WhatsApp
+  // e quebraria o blind index de webhook_token (hmacKey ficaria null).
+  return { enabled, dualWrite, allowPlaintextRead, keyring, activeKey, hmacKey };
 }
 
 function state() {

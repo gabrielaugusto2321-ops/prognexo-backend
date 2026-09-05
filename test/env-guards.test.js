@@ -67,4 +67,25 @@ describe('env — combinações perigosas derrubam o boot', () => {
   it('development sem PRODUCTION_HOSTS não trava (sem lista, nada é "produção")', () => {
     expect(() => validateEnv({ NODE_ENV: 'development', APP_ENV: 'development', SUPABASE_URL: 'https://x.supabase.co' })).not.toThrow();
   });
+
+  it('entrega de convite exige outbox habilitado', () => {
+    expect(() => validateEnv({ ...base, TEAM_INVITE_EMAIL_DELIVERY_ENABLED: 'true' }))
+      .toThrow(/TEAM_INVITE_OUTBOX_ENABLED/);
+  });
+
+  it('outbox exige keyring/active key mesmo com TOKEN_ENCRYPTION_ENABLED=false', () => {
+    expect(() => validateEnv({ ...base, TEAM_INVITE_OUTBOX_ENABLED: 'true' }))
+      .toThrow(/TOKEN_ENCRYPTION_KEYRING/);
+  });
+
+  it('dupla flag exige RESEND_API_KEY', () => {
+    const key = Buffer.alloc(32, 1).toString('base64');
+    expect(() => validateEnv({ ...base, TEAM_INVITE_OUTBOX_ENABLED: 'true', TEAM_INVITE_EMAIL_DELIVERY_ENABLED: 'true', TOKEN_ENCRYPTION_KEYRING: JSON.stringify({ v1: key }), TOKEN_ENCRYPTION_ACTIVE_KEY: 'v1' }))
+      .toThrow(/RESEND_API_KEY/);
+  });
+
+  it('outbox configurado funciona sem ligar a criptografia legada', () => {
+    const key = Buffer.alloc(32, 2).toString('base64');
+    expect(() => validateEnv({ ...base, TEAM_INVITE_OUTBOX_ENABLED: 'true', TOKEN_ENCRYPTION_ENABLED: 'false', TOKEN_ENCRYPTION_KEYRING: JSON.stringify({ v1: key }), TOKEN_ENCRYPTION_ACTIVE_KEY: 'v1' })).not.toThrow();
+  });
 });
