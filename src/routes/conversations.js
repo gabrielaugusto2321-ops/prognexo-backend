@@ -105,7 +105,7 @@ router.post('/send', async (req, res) => {
   // Resolve o lead no servidor e confirma o acesso (closer só responde os
   // próprios leads) — nunca confia no lead_id do body sozinho.
   const authorization = await authorizeResource({
-    user: req.user,
+    req,
     table: 'leads',
     id: lead_id,
     requireOwnerForCloser: true,

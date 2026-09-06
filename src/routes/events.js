@@ -85,7 +85,7 @@ router.post('/', async (req, res, next) => {
     // (não pertence a nenhuma clínica) — mas então precisa informar um
     // responsavel_id explícito de alguém que pertence.
     if (req.user.role !== 'admin' || body.responsavel_id) {
-      if (!(await assertUserAccess({ userId: responsavelId, doctorId: body.doctor_id }))) {
+      if (!(await assertUserAccess({ req, userId: responsavelId, doctorId: body.doctor_id }))) {
         return res.status(403).json({ error: 'related_resource_forbidden' });
       }
     }
@@ -144,7 +144,7 @@ router.patch('/:id/status', async (req, res, next) => {
 
     // Resolve o evento no servidor e confirma o acesso (closer só o próprio).
     const auth = await authorizeResource({
-      user: req.user,
+      req,
       table: 'events',
       id: req.params.id,
       requireOwnerForCloser: true,

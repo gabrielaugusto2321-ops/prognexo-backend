@@ -49,12 +49,23 @@ async function resolveDoctorId(req, queryDoctorId) {
 }
 const orgOf = (req) => (req.tenant?.enabled && req.tenant.organizationId ? { organization_id: req.tenant.organizationId } : {});
 
+// FASE 2.9 — com tenant core ligado e uma organização selecionada que ainda
+// não tem `organization_doctor_map`, o doctor_id não resolve. Isso é lacuna de
+// backfill, não "faltou um parâmetro": responde 409 (mesma semântica do
+// disparo de campanha), nunca cai no caminho legado.
+function respondDoctorIdGap(req, res) {
+  if (req.tenant?.enabled && req.tenant.organizationId && !req.tenant.doctorId) {
+    return res.status(409).json({ error: 'tenant_backfill_required' });
+  }
+  return res.status(400).json({ error: 'doctor_id necessário' });
+}
+
 // GET /integrations?doctor_id= (obrigatório se for admin)
 // Garante que os 5 tokens existam (cria os que faltarem) e devolve todos.
 // access_token nunca volta no JSON — é write-only, só pra não vazar segredo pro frontend.
 router.get('/', async (req, res) => {
   const doctorId = await resolveDoctorId(req, req.query.doctor_id);
-  if (!doctorId) return res.status(400).json({ error: 'doctor_id necessário' });
+  if (!doctorId) return respondDoctorIdGap(req, res);
 
   for (const gateway of GATEWAYS) {
     await supabase
@@ -72,7 +83,7 @@ router.get('/', async (req, res) => {
 // access_token permanente do próprio WhatsApp (gerado no Meta for Developers).
 router.patch('/whatsapp', async (req, res) => {
   const doctorId = await resolveDoctorId(req, req.body.doctor_id);
-  if (!doctorId) return res.status(400).json({ error: 'doctor_id necessário' });
+  if (!doctorId) return respondDoctorIdGap(req, res);
 
   const { external_id, access_token } = req.body;
   if (external_id === undefined && access_token === undefined) {
@@ -114,7 +125,7 @@ router.patch('/whatsapp', async (req, res) => {
 // phone_number_id que o próprio fluxo devolve via postMessage no navegador.
 router.post('/whatsapp/embedded-callback', async (req, res) => {
   const doctorId = await resolveDoctorId(req, req.body.doctor_id);
-  if (!doctorId) return res.status(400).json({ error: 'doctor_id necessário' });
+  if (!doctorId) return respondDoctorIdGap(req, res);
 
   const { code, waba_id, phone_number_id } = req.body;
   if (!code || !waba_id || !phone_number_id) {

@@ -55,7 +55,9 @@ function seed() {
     ],
     leads: [
       { id: 'lA', doctor_id: DOC_A, organization_id: ORG_A, status_atual: 'lead', criado_em: new Date().toISOString() },
-      // lead da Org B, com MULTI como responsável (passa no authorizeResource legado)
+      // lead da Org B, com MULTI como responsável. MULTI tem acesso legado
+      // (user_doctor_access) ao doctor da Org B — FASE 2.9 fecha esse fallback:
+      // com Org A selecionada, authorizeResource escopa só ao doctor da Org A.
       { id: 'lB', doctor_id: U('e'), organization_id: ORG_B, sdr_responsavel_id: MULTI, status_atual: 'lead', telefone: '551100', criado_em: new Date().toISOString() },
     ],
     user_doctor_access: [
@@ -164,7 +166,10 @@ describe('X-Unit-Id — propagação e validação (flag on)', () => {
       .set('X-Organization-Id', ORG_A) // seleciona Org A
       .send({ lead_id: 'lB', texto: 'oi' }); // lead está na Org B
     expect(res.status).toBe(403);
-    expect(res.body.error).toBe('lead_fora_da_organizacao');
+    // FASE 2.9: authorizeResource agora escopa pelo contexto de tenant e barra
+    // o cross-tenant como 'forbidden' antes mesmo do check de organização do
+    // lead (que continua como defesa em profundidade -> 'lead_fora_da_organizacao').
+    expect(['forbidden', 'lead_fora_da_organizacao']).toContain(res.body.error);
     expect(send).not.toHaveBeenCalled();
     vi.doUnmock('../src/lib/whatsapp.js');
   });

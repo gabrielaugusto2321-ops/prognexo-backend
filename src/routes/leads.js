@@ -127,7 +127,7 @@ router.post('/', async (req, res, next) => {
     if (req.user.role === 'closer') {
       if (owner && owner !== req.user.id) return res.status(403).json({ error: 'forbidden' });
       owner = req.user.id;
-    } else if (owner && !(await assertUserAccess({ userId: owner, doctorId: body.doctor_id }))) {
+    } else if (owner && !(await assertUserAccess({ req, userId: owner, doctorId: body.doctor_id }))) {
       return res.status(403).json({ error: 'related_resource_forbidden' });
     }
     if (!owner) owner = await escolherCloserAutomatico(body.doctor_id);
@@ -159,7 +159,7 @@ router.patch('/:id', async (req, res, next) => {
   try {
     // Resolve o lead no servidor e confirma o acesso do usuário — nunca confia no :id sozinho.
     const auth = await authorizeResource({
-      user: req.user,
+      req,
       table: 'leads',
       id: req.params.id,
       requireOwnerForCloser: true,
@@ -175,7 +175,7 @@ router.patch('/:id', async (req, res, next) => {
     }
     if (
       parsed.data.sdr_responsavel_id &&
-      !(await assertUserAccess({ userId: parsed.data.sdr_responsavel_id, doctorId: auth.row.doctor_id }))
+      !(await assertUserAccess({ req, userId: parsed.data.sdr_responsavel_id, doctorId: auth.row.doctor_id }))
     ) {
       return res.status(403).json({ error: 'related_resource_forbidden' });
     }

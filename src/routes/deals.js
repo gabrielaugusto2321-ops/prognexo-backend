@@ -74,7 +74,7 @@ router.patch('/:id/etapa', async (req, res, next) => {
     // Resolve o deal no servidor (dono = médico do lead) e confirma o acesso —
     // closer só move card onde é o responsável.
     const auth = await authorizeResource({
-      user: req.user,
+      req,
       table: 'deals',
       id: req.params.id,
       ownerPath: 'leads.doctor_id',

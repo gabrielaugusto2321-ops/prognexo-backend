@@ -63,6 +63,13 @@ const schema = z.object({
   // mantendo compatibilidade com doctor_id pelo organization_doctor_map.
   TENANT_CORE_ENABLED: bool.default('false'),
 
+  // FASE 2.9 — shadow-read: com TENANT_CORE_ENABLED=true, cada leitura escopada
+  // do corte vertical compara o escopo NOVO (contexto de tenant) com o LEGADO
+  // (getScopedDoctorIds) e REGISTRA divergências (contadores + log sem PII).
+  // Nunca altera a decisão de acesso, nunca duplica efeito externo. false =
+  // não compara nada.
+  TENANT_SHADOW_READ_ENABLED: bool.default('false'),
+
   // FASE 2.6 — cutover do módulo de equipe para memberships. false = /team
   // continua 100% sobre user_doctor_access (comportamento atual, inalterado).
   // true (só local) = /team lê e escreve via memberships/membership_units
@@ -263,6 +270,33 @@ function validateTokenEncryption(env, appEnv) {
   return { problems, warnings };
 }
 
+// FASE 2.9 — cadeia de dependências das flags de tenancy/equipe. Cada camada
+// nova SÓ pode ligar se a de baixo já estiver ligada; do contrário o boot cai
+// (nunca "funciona por acidente" com metade da arquitetura ativa).
+//
+//   TENANT_CORE_ENABLED
+//     └─ TEAM_MEMBERSHIPS_ENABLED        (equipe lê/escreve memberships)
+//          └─ TEAM_INVITE_OUTBOX_ENABLED (convite cria membership 'invited')
+//               └─ TEAM_INVITE_EMAIL_DELIVERY_ENABLED (validado em validateTeamInviteOutbox)
+//
+// A fila de jobs (PERSISTENT_JOB_QUEUE/USAGE_QUOTAS/CAMPAIGN_JOB_QUEUE) é
+// tenant-scoped na própria RPC (`organization_id` obrigatório, exceto
+// allowlist global) — não depende de TENANT_CORE_ENABLED no boot.
+export function validateTenantFlagChain(env) {
+  const tenantCore = env.TENANT_CORE_ENABLED === 'true';
+  const memberships = env.TEAM_MEMBERSHIPS_ENABLED === 'true';
+  const outbox = env.TEAM_INVITE_OUTBOX_ENABLED === 'true';
+  const problems = [];
+
+  if (memberships && !tenantCore) {
+    problems.push('TEAM_MEMBERSHIPS_ENABLED=true exige TENANT_CORE_ENABLED=true (o módulo de equipe resolve organização pelo contexto de tenant)');
+  }
+  if (outbox && !memberships) {
+    problems.push('TEAM_INVITE_OUTBOX_ENABLED=true exige TEAM_MEMBERSHIPS_ENABLED=true (o convite provisiona uma membership \'invited\')');
+  }
+  return { problems };
+}
+
 export function validateTeamInviteOutbox(env, appEnv) {
   const outbox = env.TEAM_INVITE_OUTBOX_ENABLED === 'true';
   const delivery = env.TEAM_INVITE_EMAIL_DELIVERY_ENABLED === 'true';
@@ -356,6 +390,11 @@ export function validateEnv(source = process.env) {
   }
   for (const w of tokenEnc.warnings) {
     process.stderr.write(`[env] AVISO: ${w}\n`);
+  }
+
+  const flagChain = validateTenantFlagChain(env);
+  if (flagChain.problems.length) {
+    throw new Error(`Invalid tenant flag chain:\n- ${flagChain.problems.join('\n- ')}`);
   }
 
   const inviteOutbox = validateTeamInviteOutbox(env, appEnv);

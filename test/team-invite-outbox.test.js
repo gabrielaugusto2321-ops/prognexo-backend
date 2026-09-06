@@ -3,6 +3,8 @@ import { beforeAll, afterAll, describe, expect, it, vi } from 'vitest';
 process.env.NODE_ENV='test';
 process.env.SUPABASE_URL='http://127.0.0.1:54321';
 process.env.SUPABASE_SERVICE_ROLE_KEY='synthetic-test-key';
+process.env.TENANT_CORE_ENABLED='true';
+process.env.TEAM_MEMBERSHIPS_ENABLED='true';
 process.env.TEAM_INVITE_OUTBOX_ENABLED='true';
 process.env.TEAM_INVITE_EMAIL_DELIVERY_ENABLED='false';
 const key=Buffer.alloc(32,7).toString('base64');

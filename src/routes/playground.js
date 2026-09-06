@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { supabase } from '../lib/supabase.js';
 import { requireAuth, getScopedDoctorIds } from '../middleware/auth.js';
+import { attachTenantContext, scopedDoctorIds } from '../lib/tenantContext.js';
 import { processarMensagemComIA } from '../lib/iaAgent.js';
 import { buscarChunksRelevantes } from '../lib/knowledgeChunks.js';
 import { AI_LIMITS, checkHistoryLimits, tryAcquireAiSlot } from '../lib/aiLimits.js';
@@ -9,6 +10,7 @@ import { logger } from '../lib/logger.js';
 
 const router = Router();
 router.use(requireAuth);
+router.use(attachTenantContext); // FASE 2.9 — no-op se TENANT_CORE_ENABLED=false
 
 const schema = z
   .object({
@@ -39,7 +41,7 @@ router.post('/simular', async (req, res, next) => {
   const limitCheck = checkHistoryLimits(historico, contexto_produto ?? undefined);
   if (!limitCheck.ok) return res.status(413).json({ error: limitCheck.reason });
 
-  const scopedIds = await getScopedDoctorIds(req.user);
+  const scopedIds = await scopedDoctorIds(req, getScopedDoctorIds);
   if (scopedIds && !scopedIds.includes(doctor_id)) {
     return res.status(403).json({ error: 'forbidden' });
   }

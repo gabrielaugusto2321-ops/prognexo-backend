@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { supabase } from '../lib/supabase.js';
 import { requireAuth } from '../middleware/auth.js';
+import { getShadowMetrics } from '../lib/tenantShadowRead.js';
+import { isPlatformAdminUser } from '../lib/tenantContext.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -55,6 +57,15 @@ router.get('/context', async (req, res) => {
     req.log?.error({ err }, 'tenant context endpoint failed');
     res.status(500).json({ error: 'internal_error', requestId: req.id });
   }
+});
+
+// GET /tenant/shadow-metrics
+// Endpoint EXPLICITAMENTE GLOBAL (não usa attachTenantContext): contadores
+// acumulados do shadow-read de escopo (FASE 2.9). Só platform_admin. Não
+// devolve IDs, PII nem organização — só números agregados desde o boot.
+router.get('/shadow-metrics', async (req, res) => {
+  if (!(await isPlatformAdminUser(req.user))) return res.status(403).json({ error: 'forbidden' });
+  res.json(getShadowMetrics());
 });
 
 export default router;

@@ -8,11 +8,14 @@ const ORG_A='30000000-0000-4000-8000-000000000001';
 const ORG_B='30000000-0000-4000-8000-000000000002';
 const OWNER='40000000-0000-4000-8000-000000000001';
 const INVITED='40000000-0000-4000-8000-000000000002';
+// FASE 2.9 — invariante de compat: toda org ativa tem organization_doctor_map.
+const DOC_A_MAP='d0000000-0000-4000-8000-0000000000a1';
+const DOC_B_MAP='d0000000-0000-4000-8000-0000000000b1';
 let db;
 vi.mock('../src/lib/supabase.js',()=>({get supabase(){return db.client;}}));
 
 function seed(){
- db=makeDb({users:[{id:OWNER,email:'owner@x.test',role:'doctor',ativo:true}],organizations:[{id:ORG_A,name:'A',status:'active'},{id:ORG_B,name:'B',status:'active'}],memberships:[{id:'m-owner',organization_id:ORG_A,user_id:OWNER,role:'organization_owner',status:'active'}],organization_invitations:[],outbox_events:[],membership_units:[],units:[],platform_admins:[]});
+ db=makeDb({users:[{id:OWNER,email:'owner@x.test',role:'doctor',ativo:true}],organizations:[{id:ORG_A,name:'A',status:'active'},{id:ORG_B,name:'B',status:'active'}],memberships:[{id:'m-owner',organization_id:ORG_A,user_id:OWNER,role:'organization_owner',status:'active'}],organization_doctor_map:[{organization_id:ORG_A,doctor_id:DOC_A_MAP,default_unit_id:null},{organization_id:ORG_B,doctor_id:DOC_B_MAP,default_unit_id:null}],organization_invitations:[],outbox_events:[],membership_units:[],units:[],platform_admins:[]});
  db.setAuthUser('owner-token',{id:OWNER}); db.setAuthUser('invite-token',{id:INVITED,email_confirmed_at:new Date().toISOString()});
  const original=db.client.rpc;
  db.client.rpc=vi.fn(async(name,p)=>{

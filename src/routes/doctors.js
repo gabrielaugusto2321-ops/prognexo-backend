@@ -1,13 +1,18 @@
 import { Router } from 'express';
 import { supabase } from '../lib/supabase.js';
 import { requireAuth, getScopedDoctorIds } from '../middleware/auth.js';
+import { attachTenantContext, scopedDoctorIds, isPlatformAdminUser } from '../lib/tenantContext.js';
 
 const router = Router();
 router.use(requireAuth);
 
+// FASE 2.9 — attachTenantContext é aplicado POR ROTA, não no router inteiro:
+// POST /doctors (criar médico) é operação GLOBAL de plataforma e NÃO exige
+// seleção de organização; as demais são tenant-scoped.
+
 // GET /doctors — lista os médicos que o usuário logado pode ver
-router.get('/', async (req, res) => {
-  const scopedIds = await getScopedDoctorIds(req.user);
+router.get('/', attachTenantContext, async (req, res) => {
+  const scopedIds = await scopedDoctorIds(req, getScopedDoctorIds);
 
   let query = supabase.from('doctors').select('*').order('criado_em', { ascending: false });
   if (scopedIds) query = query.in('id', scopedIds);
@@ -17,9 +22,9 @@ router.get('/', async (req, res) => {
   res.json(data);
 });
 
-// POST /doctors — só admin cria médico novo
+// POST /doctors — GLOBAL: só admin de plataforma cria médico novo.
 router.post('/', async (req, res) => {
-  if (req.user.role !== 'admin') {
+  if (!(await isPlatformAdminUser(req.user))) {
     return res.status(403).json({ error: 'Só admin pode cadastrar médicos' });
   }
 
@@ -32,8 +37,8 @@ router.post('/', async (req, res) => {
 
 // PATCH /doctors/:id/ia — liga/desliga o atendimento por IA e salva
 // contexto, nome do agente, guardrails e critérios de qualificação
-router.patch('/:id/ia', async (req, res) => {
-  const scopedIds = await getScopedDoctorIds(req.user);
+router.patch('/:id/ia', attachTenantContext, async (req, res) => {
+  const scopedIds = await scopedDoctorIds(req, getScopedDoctorIds);
   if (scopedIds && !scopedIds.includes(req.params.id)) {
     return res.status(403).json({ error: 'Sem acesso a este médico' });
   }
@@ -63,8 +68,8 @@ router.patch('/:id/ia', async (req, res) => {
 // Onboarding rápido: o médico descreve o negócio em 2-3 frases, e a IA
 // devolve um contexto completo pronto pra revisar e salvar — sem exigir
 // que ele escreva o texto de configuração do zero.
-router.post('/:id/ia/gerar-contexto', async (req, res) => {
-  const scopedIds = await getScopedDoctorIds(req.user);
+router.post('/:id/ia/gerar-contexto', attachTenantContext, async (req, res) => {
+  const scopedIds = await scopedDoctorIds(req, getScopedDoctorIds);
   if (scopedIds && !scopedIds.includes(req.params.id)) {
     return res.status(403).json({ error: 'Sem acesso a este médico' });
   }

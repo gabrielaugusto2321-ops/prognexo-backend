@@ -1,19 +1,40 @@
 import { supabase } from './supabase.js';
 import { env } from '../config/env.js';
+import { shadowCompareScope } from './tenantShadowRead.js';
 
 // Resolvedor central de contexto de tenant (FASE 2.1).
 //
 // Regras:
 //  - `organization_id` NUNCA vem do body. Só do header `X-Organization-Id` ou
-//    da única membership ativa do usuário.
+//    da única membership ATIVA do usuário.
 //  - organização é derivada de uma membership ATIVA e autorizada.
 //  - sem fallback silencioso para "o primeiro tenant".
 //  - usuário com >1 organização precisa selecionar uma (header) — senão 409.
-//  - platform_admin é tratado explicitamente.
-//  - compatibilidade: `doctorId` é resolvido pelo `organization_doctor_map`.
+//  - FASE 2.9: platform_admin numa rota tenant-scoped NÃO opera "global".
+//    Sem organização selecionada -> 409 organization_selection_required.
+//    Organização selecionada -> fica LIMITADO àquela organização (mesmo
+//    escopo de doctor que um membro comum). Acesso global só existe em
+//    endpoint administrativo explicitamente global (que não usa este
+//    middleware — ex.: POST /doctors, GET /tenant/shadow-metrics).
+//  - FASE 2.9: organização sem `organization_doctor_map` (invariante de
+//    compat quebrada) -> 409 tenant_backfill_required, para NINGUÉM
+//    (nem platform_admin) — nunca "vê tudo".
 //
 // Enquanto `TENANT_CORE_ENABLED=false`, o middleware não bloqueia nada — só
 // anexa `req.tenant = { enabled:false }` e as rotas seguem pelo caminho antigo.
+
+// Helper reutilizável para endpoints EXPLICITAMENTE globais (não passam pelo
+// attachTenantContext): confirma se o usuário é admin de plataforma.
+export async function isPlatformAdminUser(user) {
+  if (!user) return false;
+  if (user.role === 'admin') return true;
+  const { data } = await supabase
+    .from('platform_admins')
+    .select('user_id')
+    .eq('user_id', user.id)
+    .maybeSingle();
+  return Boolean(data);
+}
 
 export async function resolveTenantContext(req) {
   const user = req.user; // vem do requireAuth
@@ -56,18 +77,25 @@ export async function resolveTenantContext(req) {
 
   const organizationId = membership?.organization_id ?? requestedOrg ?? null;
 
-  // platform_admin sem org selecionada: contexto "global" (sem doctorId).
-  let doctorId = null;
-  let defaultUnitId = null;
-  if (organizationId) {
-    const { data: map } = await supabase
-      .from('organization_doctor_map')
-      .select('doctor_id, default_unit_id')
-      .eq('organization_id', organizationId)
-      .maybeSingle();
-    doctorId = map?.doctor_id ?? null;
-    defaultUnitId = map?.default_unit_id ?? null;
+  // FASE 2.9 — platform_admin sem organização selecionada numa rota
+  // tenant-scoped PRECISA selecionar (nunca opera global aqui).
+  if (!organizationId) {
+    return { ok: false, code: 'organization_selection_required', status: 409 };
   }
+
+  // Compat: `doctorId` vem do organization_doctor_map. FASE 2.9 — sem essa
+  // linha a organização não está pronta para o cutover: 409 para TODOS
+  // (inclusive platform_admin), nunca degrada para "vê tudo".
+  const { data: map } = await supabase
+    .from('organization_doctor_map')
+    .select('doctor_id, default_unit_id')
+    .eq('organization_id', organizationId)
+    .maybeSingle();
+  if (!map || !map.doctor_id) {
+    return { ok: false, code: 'tenant_backfill_required', status: 409 };
+  }
+  const doctorId = map.doctor_id;
+  const defaultUnitId = map.default_unit_id ?? null;
 
   const unitIds = (membership?.membership_units || []).map((u) => u.unit_id);
 
@@ -76,7 +104,6 @@ export async function resolveTenantContext(req) {
   // pertencer à organização. Divergência -> 403 (nunca ignora silenciosamente).
   let unitId = null;
   if (requestedUnit) {
-    if (!organizationId) return { ok: false, code: 'unit_requires_organization', status: 409 };
     let unitOk = unitIds.includes(requestedUnit);
     if (!unitOk && isPlatformAdmin) {
       const { data: u } = await supabase
@@ -108,11 +135,15 @@ export async function resolveTenantContext(req) {
 
 // Compat: quais doctor_id o request pode enxergar.
 //  - tenant core OFF  -> caminho antigo (getScopedDoctorIds).
-//  - tenant core ON   -> deriva do contexto (map). null = platform_admin sem org (vê tudo).
+//  - tenant core ON   -> SEMPRE [doctorId] da organização selecionada. O
+//    middleware já garante que `doctorId` existe (senão 409). Não há mais
+//    caminho "null = vê tudo" — nem para platform_admin.
 export async function scopedDoctorIds(req, getScopedDoctorIds) {
   if (req.tenant?.enabled) {
-    if (req.tenant.isPlatformAdmin && !req.tenant.doctorId) return null;
-    return req.tenant.doctorId ? [req.tenant.doctorId] : [];
+    const ids = req.tenant.doctorId ? [req.tenant.doctorId] : [];
+    // FASE 2.9 — shadow-read: compara com o legado e registra divergências.
+    // Não altera `ids` (a decisão de acesso continua sendo o contexto novo).
+    return shadowCompareScope(req, ids);
   }
   return getScopedDoctorIds(req.user);
 }
@@ -120,7 +151,8 @@ export async function scopedDoctorIds(req, getScopedDoctorIds) {
 // Compat: o request tem acesso a este doctor_id?
 export async function tenantAllowsDoctor(req, doctorId, getScopedDoctorIds) {
   if (req.tenant?.enabled) {
-    return req.tenant.isPlatformAdmin || req.tenant.doctorId === doctorId;
+    // Limitado à organização selecionada — platform_admin incluído.
+    return req.tenant.doctorId === doctorId;
   }
   const ids = await getScopedDoctorIds(req.user);
   return !ids || ids.includes(doctorId);

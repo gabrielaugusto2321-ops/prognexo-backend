@@ -12,6 +12,13 @@ process.env.CORS_ALLOWED_ORIGINS = 'https://app.test';
 let db;
 vi.mock('../src/lib/supabase.js', () => ({ get supabase() { return db.client; } }));
 
+// Aquece a árvore de imports pesada (googleapis é frio e lento no Windows)
+// FORA do timeout de teste — senão o 1º `app()` (que faz vi.resetModules() +
+// re-import de src/server.js) estoura os 30s de forma não-determinística.
+// Mesmo padrão de test/campaigns-job-queue.test.js. Não é --retry/skip: paga
+// o custo do cold import UMA vez, no setup, antes de qualquer clock de teste.
+await import('../src/server.js');
+
 const U = (n) => `0000000${n}-0000-4000-8000-000000000000`;
 const OWNER_A = U(1);
 const ADMIN_A = U(2);

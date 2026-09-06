@@ -68,25 +68,42 @@ describe('env — combinações perigosas derrubam o boot', () => {
     expect(() => validateEnv({ NODE_ENV: 'development', APP_ENV: 'development', SUPABASE_URL: 'https://x.supabase.co' })).not.toThrow();
   });
 
+  // FASE 2.9 — cadeia de dependências de flags de tenancy/equipe.
+  const teamChain = { TENANT_CORE_ENABLED: 'true', TEAM_MEMBERSHIPS_ENABLED: 'true' };
+
+  it('TEAM_MEMBERSHIPS_ENABLED exige TENANT_CORE_ENABLED', () => {
+    expect(() => validateEnv({ ...base, TEAM_MEMBERSHIPS_ENABLED: 'true' }))
+      .toThrow(/TEAM_MEMBERSHIPS_ENABLED=true exige TENANT_CORE_ENABLED=true/);
+  });
+
+  it('TEAM_INVITE_OUTBOX_ENABLED exige TEAM_MEMBERSHIPS_ENABLED', () => {
+    expect(() => validateEnv({ ...base, TENANT_CORE_ENABLED: 'true', TEAM_INVITE_OUTBOX_ENABLED: 'true' }))
+      .toThrow(/TEAM_INVITE_OUTBOX_ENABLED=true exige TEAM_MEMBERSHIPS_ENABLED=true/);
+  });
+
+  it('TENANT_CORE_ENABLED sozinho não exige nada além', () => {
+    expect(() => validateEnv({ ...base, TENANT_CORE_ENABLED: 'true' })).not.toThrow();
+  });
+
   it('entrega de convite exige outbox habilitado', () => {
-    expect(() => validateEnv({ ...base, TEAM_INVITE_EMAIL_DELIVERY_ENABLED: 'true' }))
+    expect(() => validateEnv({ ...base, ...teamChain, TEAM_INVITE_EMAIL_DELIVERY_ENABLED: 'true' }))
       .toThrow(/TEAM_INVITE_OUTBOX_ENABLED/);
   });
 
   it('outbox exige keyring/active key mesmo com TOKEN_ENCRYPTION_ENABLED=false', () => {
-    expect(() => validateEnv({ ...base, TEAM_INVITE_OUTBOX_ENABLED: 'true' }))
+    expect(() => validateEnv({ ...base, ...teamChain, TEAM_INVITE_OUTBOX_ENABLED: 'true' }))
       .toThrow(/TOKEN_ENCRYPTION_KEYRING/);
   });
 
   it('dupla flag exige RESEND_API_KEY', () => {
     const key = Buffer.alloc(32, 1).toString('base64');
-    expect(() => validateEnv({ ...base, TEAM_INVITE_OUTBOX_ENABLED: 'true', TEAM_INVITE_EMAIL_DELIVERY_ENABLED: 'true', TOKEN_ENCRYPTION_KEYRING: JSON.stringify({ v1: key }), TOKEN_ENCRYPTION_ACTIVE_KEY: 'v1' }))
+    expect(() => validateEnv({ ...base, ...teamChain, TEAM_INVITE_OUTBOX_ENABLED: 'true', TEAM_INVITE_EMAIL_DELIVERY_ENABLED: 'true', TOKEN_ENCRYPTION_KEYRING: JSON.stringify({ v1: key }), TOKEN_ENCRYPTION_ACTIVE_KEY: 'v1' }))
       .toThrow(/RESEND_API_KEY/);
   });
 
   it('outbox configurado funciona sem ligar a criptografia legada', () => {
     const key = Buffer.alloc(32, 2).toString('base64');
-    expect(() => validateEnv({ ...base, TEAM_INVITE_OUTBOX_ENABLED: 'true', TOKEN_ENCRYPTION_ENABLED: 'false', TOKEN_ENCRYPTION_KEYRING: JSON.stringify({ v1: key }), TOKEN_ENCRYPTION_ACTIVE_KEY: 'v1' })).not.toThrow();
+    expect(() => validateEnv({ ...base, ...teamChain, TEAM_INVITE_OUTBOX_ENABLED: 'true', TOKEN_ENCRYPTION_ENABLED: 'false', TOKEN_ENCRYPTION_KEYRING: JSON.stringify({ v1: key }), TOKEN_ENCRYPTION_ACTIVE_KEY: 'v1' })).not.toThrow();
   });
 
   // FASE 2.8 — fila de jobs persistente + quotas
