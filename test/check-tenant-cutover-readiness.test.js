@@ -141,7 +141,7 @@ describe('runReadiness — checagens', () => {
     expect(check.ids).toEqual(['d2']);
   });
 
-  it('usuário multi-org e usuário sem membership -> pendências', async () => {
+  it('multi-org = AVISO (não bloqueia); usuário sem membership = BLOQUEADOR (exit 2)', async () => {
     const t = cleanTables();
     t.users.push({ id: 'u2', ativo: true }, { id: 'u3', ativo: true });
     t.memberships.push(
@@ -150,8 +150,31 @@ describe('runReadiness — checagens', () => {
     );
     const { client } = fakeClient(t);
     const r = await runReadiness({ client, appEnv: 'development', supabaseUrl: LOCAL });
-    expect(r.results.find((x) => x.key === 'usuarios_multi_org').ids).toEqual(['u2']);
-    expect(r.results.find((x) => x.key === 'usuarios_sem_membership_ativa').ids).toEqual(['u3']);
+    const multi = r.results.find((x) => x.key === 'usuarios_multi_org');
+    expect(multi.ids).toEqual(['u2']);
+    expect(multi.severity).toBe('warning');
+    expect(r.warnings.map((w) => w.key)).toContain('usuarios_multi_org');
+    const orfao = r.results.find((x) => x.key === 'usuarios_sem_membership_ativa');
+    expect(orfao.ids).toEqual(['u3']);
+    expect(orfao.severity).toBe('blocker');
+    expect(r.code).toBe(2); // o bloqueador manda
+  });
+
+  it('SÓ multi-org pendente (nenhum bloqueador) -> exit 0 com aviso', async () => {
+    const t = cleanTables();
+    t.users.push({ id: 'u2', ativo: true });
+    t.memberships.push(
+      { id: 'm2', user_id: 'u2', organization_id: 'o1', status: 'active' },
+      { id: 'm3', user_id: 'u2', organization_id: 'o2', status: 'active' },
+    );
+    // u2 precisa de unidade nas duas orgs para não disparar memberships_sem_unidade
+    t.membership_units.push({ membership_id: 'm2' }, { membership_id: 'm3' });
+    t.units.push({ organization_id: 'o2', status: 'active' });
+    const { client } = fakeClient(t);
+    const r = await runReadiness({ client, appEnv: 'development', supabaseUrl: LOCAL });
+    expect(r.code).toBe(0);
+    expect(r.ok).toBe(true);
+    expect(r.warnings.map((w) => w.key)).toEqual(['usuarios_multi_org']);
   });
 
   it('platform_admin sem membership NÃO é pendência', async () => {

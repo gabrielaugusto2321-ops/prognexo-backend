@@ -33,8 +33,12 @@ import { guardEnvironment } from './check-campaigns-without-org.js';
 
 export const MAX_IDS = 50;
 
-// Cada checagem: { key, describe, run(client) -> { count, ids } }.
+// Cada checagem: { key, severity, describe, run(client) -> { count, ids } }.
 // `run` só chama .select() — nenhuma escrita.
+//   severity 'blocker' (default) -> count>0 derruba para exit 2.
+//   severity 'warning'          -> count>0 é reportado mas NÃO derruba
+//                                  (estado suportado que exige atenção
+//                                  operacional, não impedimento técnico).
 const CHECKS = [
   {
     key: 'leads_sem_organizacao',
@@ -122,7 +126,8 @@ const CHECKS = [
   },
   {
     key: 'usuarios_multi_org',
-    describe: 'users com >1 membership ativa (precisam selecionar organização a cada sessão)',
+    severity: 'warning',
+    describe: 'users com >1 membership ativa — estado SUPORTADO (o backend exige X-Organization-Id, 409 sem seleção); só um aviso operacional, não bloqueia o cutover',
     async run(c) {
       const { data: members } = await c
         .from('memberships')
@@ -251,32 +256,38 @@ export async function runReadiness({ client, appEnv, supabaseUrl, env = process.
 
   const results = [];
   for (const check of checks) {
+    const severity = check.severity || 'blocker';
     try {
       const r = await check.run(client);
-      results.push({ key: check.key, describe: check.describe, count: r.count, ids: r.ids, truncated: r.count > r.ids.length });
+      results.push({ key: check.key, severity, describe: check.describe, count: r.count, ids: r.ids, truncated: r.count > r.ids.length });
     } catch (err) {
       // Uma tabela ausente (migration não aplicada) não deve abortar tudo —
       // reporta como erro da checagem, sem vazar mensagem crua com detalhe.
       const code = String(err?.code || err?.message || 'erro').split('\n')[0].slice(0, 80);
-      results.push({ key: check.key, describe: check.describe, error: code });
+      results.push({ key: check.key, severity, describe: check.describe, error: code });
     }
   }
 
   const failed = results.filter((r) => r.error);
-  const pending = results.filter((r) => !r.error && r.count > 0);
-  if (failed.length) return { ok: false, code: 1, reason: 'checagens com erro', results };
-  return { ok: pending.length === 0, code: pending.length === 0 ? 0 : 2, results };
+  const blockers = results.filter((r) => !r.error && r.count > 0 && r.severity !== 'warning');
+  const warnings = results.filter((r) => !r.error && r.count > 0 && r.severity === 'warning');
+  if (failed.length) return { ok: false, code: 1, reason: 'checagens com erro', results, warnings };
+  return { ok: blockers.length === 0, code: blockers.length === 0 ? 0 : 2, results, warnings };
 }
 
 // --- CLI ---
 if (process.argv[1]?.endsWith('check-tenant-cutover-readiness.js')) {
+  // Saída limpa no Windows: process.exit() abrupto pode colidir com o teardown
+  // do socket keepalive do supabase-js. Deixa o loop drenar; força só se travar.
+  const finish = (code) => { process.exitCode = code; setTimeout(() => process.exit(code), 3000).unref(); return code; };
+  await (async () => {
   const appEnv = process.env.APP_ENV || (process.env.NODE_ENV === 'test' ? 'test' : process.env.NODE_ENV);
   const supabaseUrl = process.env.SUPABASE_URL;
 
   const guard = guardEnvironment({ appEnv, supabaseUrl });
   if (!guard.ok) {
     console.error(`ERRO: ${guard.reason}`);
-    process.exit(1);
+    return finish(1);
   }
 
   const readonlyKey = process.env.SUPABASE_READONLY_KEY;
@@ -284,7 +295,7 @@ if (process.argv[1]?.endsWith('check-tenant-cutover-readiness.js')) {
   const key = readonlyKey || serviceKey;
   if (!supabaseUrl || !key) {
     console.error('ERRO: SUPABASE_URL / (SUPABASE_READONLY_KEY|SUPABASE_SERVICE_ROLE_KEY) ausentes');
-    process.exit(1);
+    return finish(1);
   }
   if (!readonlyKey) {
     console.error('AVISO: usando SUPABASE_SERVICE_ROLE_KEY (o schema exige — RLS sem grant de leitura dedicado).');
@@ -298,14 +309,22 @@ if (process.argv[1]?.endsWith('check-tenant-cutover-readiness.js')) {
     if (res.error) {
       console.log(`  [ERRO] ${res.key}: ${res.error}`);
     } else if (res.count > 0) {
-      console.log(`  [PENDENTE] ${res.key} (${res.count})${res.truncated ? ' — truncado' : ''}: ${res.ids.join(', ')}`);
+      const tag = res.severity === 'warning' ? 'AVISO' : 'BLOQUEADOR';
+      console.log(`  [${tag}] ${res.key} (${res.count})${res.truncated ? ' — truncado' : ''}: ${res.ids.join(', ')}`);
       console.log(`            ${res.describe}`);
     } else {
       console.log(`  [ok] ${res.key}`);
     }
   }
-  if (r.code === 0) console.log('\nPRONTO: nenhuma pendência de cutover.');
-  else if (r.code === 2) console.log('\nPENDÊNCIAS ENCONTRADAS: resolver antes de ligar as flags (ver docs/platform/27-flag-activation-matrix.md).');
-  else console.error(`\nERRO: ${r.reason || 'configuração/execução inválida'}`);
-  process.exit(r.code);
+  if (r.code === 0) {
+    console.log(r.warnings?.length
+      ? `\nPRONTO: nenhum bloqueador. ${r.warnings.length} aviso(s) operacional(is) acima — não impedem o cutover.`
+      : '\nPRONTO: nenhuma pendência de cutover.');
+  } else if (r.code === 2) {
+    console.log('\nBLOQUEADORES ENCONTRADOS: resolver antes de ligar as flags (ver docs/platform/27-flag-activation-matrix.md).');
+  } else {
+    console.error(`\nERRO: ${r.reason || 'configuração/execução inválida'}`);
+  }
+  return finish(r.code);
+  })();
 }
