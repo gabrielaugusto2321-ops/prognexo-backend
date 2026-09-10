@@ -154,6 +154,91 @@ router.post('/', async (req, res, next) => {
   }
 });
 
+// FASE 3.3A — feedback humano da Auditoria de IA.
+// Enum estrito: só os dois valores que a tela grava (a aba "reuniao" é
+// derivada de status_atual, não é um feedback). `null` limpa a avaliação.
+const aiFeedbackSchema = z
+  .object({ feedback: z.enum(['bom', 'ruim']).nullable() })
+  .strict();
+
+// Avaliar a IA é ação EXCLUSIVA DE GESTÃO. Posse/atribuição do lead nunca
+// concede acesso a este endpoint.
+//   tenant ON  -> platform_admin (escopado pelo tenantContext) OU membership
+//                 role em {organization_owner, organization_admin, manager}.
+//   tenant OFF -> users.role em {admin, doctor}.
+// Bloqueados em TODOS os modos: closer (mesmo dono/responsável), receptionist,
+// professional, financial, viewer, sem membership, membership suspensa, e
+// qualquer papel desconhecido.
+const AI_FEEDBACK_TENANT_ROLES = new Set(['organization_owner', 'organization_admin', 'manager']);
+const AI_FEEDBACK_LEGACY_ROLES = new Set(['admin', 'doctor']);
+
+function podeAvaliarFeedbackIa(req) {
+  if (req.tenant?.enabled) {
+    return req.tenant.isPlatformAdmin === true || AI_FEEDBACK_TENANT_ROLES.has(req.tenant.role);
+  }
+  return AI_FEEDBACK_LEGACY_ROLES.has(req.user?.role);
+}
+
+// PATCH /leads/:id/ai-feedback  { feedback: 'bom' | 'ruim' | null }
+// Persiste a avaliação humana de uma conversa entregue pela IA. Autor e
+// timestamp vêm SEMPRE do servidor (JWT + now()), nunca do body. Responde só
+// com o estado persistido do feedback — nunca a linha inteira do lead.
+router.patch('/:id/ai-feedback', async (req, res, next) => {
+  try {
+    // (1) AUTORIZAÇÃO DE PAPEL — gestão apenas. Independente de posse do lead.
+    if (!podeAvaliarFeedbackIa(req)) return res.status(403).json({ error: 'forbidden' });
+
+    // (2) RESOLUÇÃO E ESCOPO DO RECURSO — o lead precisa existir e cair no
+    // escopo de tenant/doctor do request. SEM `requireOwnerForCloser`: aquela
+    // regra concede acesso ao closer por posse, o que este endpoint proíbe.
+    const auth = await authorizeResource({ req, table: 'leads', id: req.params.id });
+    if (!auth.ok) return res.status(auth.reason === 'not_found' ? 404 : 403).json({ error: auth.reason });
+
+    // (3) CORPO ESTRITO
+    const parsed = aiFeedbackSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: 'invalid_payload' });
+
+    const { feedback } = parsed.data;
+
+    // Idempotência natural: reavaliar com o mesmo valor não reescreve nem
+    // move o timestamp — devolve o estado já persistido.
+    if ((auth.row.feedback_ia ?? null) === feedback) {
+      return res.json({
+        id: auth.row.id,
+        feedback_ia: auth.row.feedback_ia ?? null,
+        feedback_ia_at: auth.row.feedback_ia_at ?? null,
+        feedback_ia_by: auth.row.feedback_ia_by ?? null,
+      });
+    }
+
+    const patch = feedback === null
+      ? { feedback_ia: null, feedback_ia_at: null, feedback_ia_by: null }
+      : { feedback_ia: feedback, feedback_ia_at: new Date().toISOString(), feedback_ia_by: req.user.id };
+
+    const { data, error } = await supabase
+      .from('leads')
+      .update(patch)
+      .eq('id', req.params.id)
+      .select('id, feedback_ia, feedback_ia_at, feedback_ia_by')
+      .single();
+    if (error) throw error;
+
+    // Log estruturado sem conteúdo clínico (só id do lead + o valor do enum).
+    req.log?.info({ leadId: req.params.id, feedback }, 'AI conversation feedback set');
+
+    // Resposta mínima e explícita — nunca a linha inteira do lead, mesmo que o
+    // driver não respeite a projeção do .select().
+    res.json({
+      id: data.id,
+      feedback_ia: data.feedback_ia ?? null,
+      feedback_ia_at: data.feedback_ia_at ?? null,
+      feedback_ia_by: data.feedback_ia_by ?? null,
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
 // PATCH /leads/:id — atualizar status manualmente, ou reatribuir o closer responsável
 router.patch('/:id', async (req, res, next) => {
   try {
