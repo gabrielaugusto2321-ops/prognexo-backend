@@ -21,23 +21,64 @@ router.post('/campaign-outbox', requireJobRunnerAuth, async (req, res) => {
   return res.json(summary);
 });
 
+// Log de falha de job: NUNCA `err.message`/`err.detail`/`err.hint`/`err.stack`
+// — mensagem de erro do Postgres pode ecoar entrada (mesmo que esta RPC não
+// receba nenhuma hoje, blindamos contra isso mudar sem ninguém notar). Só
+// `op` (nome interno, string fixa do próprio código) + `code` normalizado
+// (SQLSTATE do Postgres ou código curto de erro do Node/rede — nunca texto
+// livre). Nada de payload de convite, token, e-mail ou PII passa por aqui.
+const SAFE_CODE = /^[A-Za-z0-9_]{1,20}$/;
+// Exportada só pra teste direto (sem depender de interceptar a saída real do
+// pino) — não é usada por nenhum outro módulo além deste arquivo e do teste.
+export function safeErrorMeta(op, err) {
+  const raw = err?.code;
+  const code = typeof raw === 'string' && SAFE_CODE.test(raw) ? raw : 'unknown';
+  return { op, code };
+}
+
+// Best-effort: marca convites 'queued'/'sent' vencidos como 'expired' antes
+// de processar o outbox. Nunca bloqueia o processamento se falhar (a
+// garantia de segurança real — convite expirado não é aceito — já vive em
+// team_invitation_accept, independente desta varredura).
+// NUNCA encadear `.catch()` direto num builder do supabase-js: `.rpc(...)`
+// devolve um thenable que expõe `.then()` mas NÃO `.catch()` (confirmado na
+// versão instalada, 2.112.2 — dentro do range ^2.45.0 do package.json).
+// Chamar `.catch()` nele lança `TypeError: ... .catch is not a function` de
+// forma síncrona, sem que nada capture — derruba o processo Node inteiro,
+// não só esta requisição. `await` dentro de `try/catch`, tratando o
+// `{ error }` devolvido pela RPC, é o único jeito seguro.
+export async function sweepExpiredInvitations(req) {
+  try {
+    const { data, error } = await supabase.rpc('team_invitation_sweep_expired');
+    if (error) throw error;
+    return { data: data ?? null };
+  } catch (err) {
+    req.log?.error(safeErrorMeta('team_invitation_sweep_expired', err), 'invitation expiry sweep failed');
+    return { data: null };
+  }
+}
+
 router.post('/team-invite-outbox', async (req, res) => {
   if (req.query.secret !== process.env.CRON_SECRET) return res.status(401).json({ error: 'Token inválido' });
   if (env.TEAM_INVITE_OUTBOX_ENABLED !== 'true') return res.status(404).json({ error: 'not_found' });
   if ((env.APP_ENV === 'production' || env.APP_ENV === 'staging') && env.TEAM_INVITE_EMAIL_DELIVERY_ENABLED !== 'true') {
     return res.status(503).json({ error: 'email_delivery_disabled' });
   }
-  // Best-effort: marca convites 'queued'/'sent' vencidos como 'expired' antes
-  // de processar o outbox. Nunca bloqueia o processamento se falhar (a
-  // garantia de segurança real — convite expirado não é aceito — já vive em
-  // team_invitation_accept, independente desta varredura).
-  const swept = await supabase.rpc('team_invitation_sweep_expired').catch((err) => { req.log?.error({ err }, 'invitation expiry sweep failed'); return { data: null }; });
-  const summary = await processOutboxBatch({
-    workerId: `http-${process.pid}-${Date.now()}`,
-    batchSize: 20,
-    adapter: configuredTeamInviteEmailAdapter(),
-  });
-  return res.json({ ...summary, expired: swept.data ?? null });
+  // Nenhum erro — esperado ou não — pode escapar deste handler: o worker é
+  // disparado por um cron externo, e um crash aqui derrubaria a API inteira
+  // pra todo mundo, não só esta chamada.
+  try {
+    const swept = await sweepExpiredInvitations(req);
+    const summary = await processOutboxBatch({
+      workerId: `http-${process.pid}-${Date.now()}`,
+      batchSize: 20,
+      adapter: configuredTeamInviteEmailAdapter(),
+    });
+    return res.json({ ...summary, expired: swept.data ?? null });
+  } catch (err) {
+    req.log?.error(safeErrorMeta('team_invite_outbox_job', err), 'team invite outbox job failed');
+    return res.status(500).json({ error: 'internal_error', requestId: req.id });
+  }
 });
 
 // POST /jobs/limpar-leads-esquecidos?secret=TOKEN
