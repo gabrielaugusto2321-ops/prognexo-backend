@@ -61,6 +61,21 @@ Responda SEMPRE em JSON puro, sem markdown, neste formato exato:
 "sem_resposta" deve ser true quando o lead perguntou algo que o contexto fornecido não cobre, e você teve que admitir que não sabe. Omita do "dados_extraidos" qualquer campo que o lead não tenha mencionado — não envie o campo com string vazia, simplesmente não o inclua.`;
 }
 
+// Remove cercas de markdown (```json ... ``` ou ``` ... ```) e texto solto
+// antes/depois do objeto — o modelo às vezes ignora "responda em JSON puro".
+// Para JSON já puro, isto é um no-op (a fatia é a própria string, sem cortes).
+function normalizarRespostaJson(textoBruto) {
+  const semCercas = textoBruto
+    .trim()
+    .replace(/^```[a-zA-Z]*\s*/, '')
+    .replace(/```\s*$/, '')
+    .trim();
+  const inicio = semCercas.indexOf('{');
+  const fim = semCercas.lastIndexOf('}');
+  if (inicio === -1 || fim === -1 || fim < inicio) return semCercas;
+  return semCercas.slice(inicio, fim + 1);
+}
+
 // historico: array de { direcao: 'recebida'|'enviada', conteudo: string }, mais antigo primeiro
 export async function processarMensagemComIA({
   nomeAgente,
@@ -110,7 +125,7 @@ export async function processarMensagemComIA({
 
   const textoBruto = data?.content?.[0]?.text ?? '';
   try {
-    const parsed = JSON.parse(textoBruto);
+    const parsed = JSON.parse(normalizarRespostaJson(textoBruto));
     const score = typeof parsed.score === 'number' ? Math.max(0, Math.min(100, parsed.score)) : null;
     const sentimentoNegativo = parsed.sentimento_negativo === true;
 
