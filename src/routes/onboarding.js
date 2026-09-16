@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { supabase } from '../lib/supabase.js';
 import { requireAuth, getScopedDoctorIds } from '../middleware/auth.js';
+import { isWhatsappOperacional, gatewaysComWebhookRecebido } from '../lib/integrationStatus.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -23,31 +24,21 @@ router.get('/', async (req, res) => {
     return res.status(403).json({ error: 'Sem acesso a este médico' });
   }
 
-  // Passo 1: WhatsApp conectado — tem phone_number_id salvo?
+  // Passo 1: WhatsApp operacional — mesma definição usada em GET /integrations
+  // (src/lib/integrationStatus.js) e nos caminhos reais de envio de mensagem.
   const { data: whatsappIntegracao } = await supabase
     .from('integrations')
-    .select('external_id')
+    .select('external_id, access_token, access_token_encrypted')
     .eq('doctor_id', doctorId)
     .eq('gateway', 'whatsapp')
     .maybeSingle();
-  const whatsapp = !!whatsappIntegracao?.external_id;
+  const whatsapp = isWhatsappOperacional(whatsappIntegracao);
 
-  // Passo 2: pelo menos 1 pagamento de verdade já chegou (qualquer plataforma)
-  const { data: leadsDoMedico } = await supabase.from('leads').select('id').eq('doctor_id', doctorId);
-  const leadIds = (leadsDoMedico || []).map((l) => l.id);
-  let pagamento = false;
-  if (leadIds.length > 0) {
-    const { data: dealsDoMedico } = await supabase.from('deals').select('id').in('lead_id', leadIds);
-    const dealIds = (dealsDoMedico || []).map((d) => d.id);
-    if (dealIds.length > 0) {
-      const { count } = await supabase
-        .from('transactions')
-        .select('id', { count: 'exact', head: true })
-        .in('deal_id', dealIds)
-        .eq('status', 'pago');
-      pagamento = (count ?? 0) > 0;
-    }
-  }
+  // Passo 2: pelo menos um gateway de pagamento com webhook comprovado
+  // (qualquer status de transação) — mesma definição de "integração
+  // comprovada" usada em GET /integrations, não só transação paga.
+  const gatewaysComWebhook = await gatewaysComWebhookRecebido(doctorId);
+  const pagamento = gatewaysComWebhook.size > 0;
 
   // Passo 3: já convidou pelo menos 1 closer
   const { count: totalClosers } = await supabase

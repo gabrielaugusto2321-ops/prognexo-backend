@@ -6,6 +6,7 @@ import { exchangeCodeForToken, registerPhoneNumber, subscribeAppToWaba } from '.
 import { CredentialVault } from '../lib/credentialVault.js';
 import { attachTenantContext } from '../lib/tenantContext.js';
 import { webhookTokenRotateLimiter } from '../middleware/rateLimits.js';
+import { isWhatsappOperacional, gatewaysComWebhookRecebido } from '../lib/integrationStatus.js';
 
 // Papéis que podem rotacionar o segredo de webhook de pagamento.
 const ROTATE_ROLES = new Set(['organization_owner', 'organization_admin']);
@@ -76,7 +77,20 @@ router.get('/', async (req, res) => {
   const { data, error } = await supabase.from('integrations').select('*').eq('doctor_id', doctorId);
   if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
 
-  res.json(data.map(stripSecrets));
+  // Fonte única de verdade (src/lib/integrationStatus.js), a mesma que
+  // GET /onboarding usa — WhatsApp e plataformas de venda nunca mais divergem
+  // sobre o mesmo médico. Nenhum campo aqui expõe token: são só booleanos.
+  const gatewaysComWebhook = await gatewaysComWebhookRecebido(doctorId);
+
+  res.json(data.map((row) => {
+    const out = stripSecrets(row);
+    if (row.gateway === 'whatsapp') {
+      out.whatsapp_operacional = isWhatsappOperacional(row);
+    } else {
+      out.webhook_recebido = gatewaysComWebhook.has(row.gateway);
+    }
+    return out;
+  }));
 });
 
 // PATCH /integrations/whatsapp — médico informa o phone_number_id e/ou o
