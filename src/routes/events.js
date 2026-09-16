@@ -30,6 +30,16 @@ const statusSchema = z
   })
   .strict();
 
+// Reaproveita literalmente os validadores de tipo/titulo/inicio/fim do
+// createSchema (mesmos limites, mesmo formato ISO) — nunca duplica regra.
+// Todos os campos ficam opcionais (edição parcial), mas o payload não pode
+// vir vazio nem com chave desconhecida (.strict()).
+const updateSchema = createSchema
+  .pick({ titulo: true, tipo: true, inicio: true, fim: true })
+  .partial()
+  .strict()
+  .refine((data) => Object.keys(data).length > 0, { message: 'empty_payload' });
+
 // GET /events?doctor_id=&from=&to=
 // Lista os eventos do período (usado pra desenhar o mês/dia na Agenda).
 router.get('/', async (req, res, next) => {
@@ -151,6 +161,16 @@ router.patch('/:id/status', async (req, res, next) => {
     });
     if (!auth.ok) return res.status(auth.reason === 'not_found' ? 404 : 403).json({ error: auth.reason });
 
+    // Confiança nunca só no frontend: "compareceu"/"faltou" exigem que o
+    // evento já tenha começado. Sem isso, dava pra marcar presença/falta de
+    // algo que ainda nem aconteceu.
+    if (
+      (parsed.data.status === 'compareceu' || parsed.data.status === 'faltou') &&
+      new Date(auth.row.inicio) > new Date()
+    ) {
+      return res.status(409).json({ error: 'event_not_started' });
+    }
+
     const { data, error } = await supabase
       .from('events')
       .update({ status: parsed.data.status })
@@ -169,6 +189,102 @@ router.patch('/:id/status', async (req, res, next) => {
       });
       if (result.error) throw result.error;
     }
+
+    res.json(data);
+  } catch (e) {
+    next(e);
+  }
+});
+
+// PATCH /events/:id — edita título/tipo/início/fim de um evento PENDENTE.
+// Se só `inicio` mudar (sem `fim`), preserva a duração original do evento —
+// o frontend deve preferencialmente mandar os dois já coerentes.
+router.patch('/:id', async (req, res, next) => {
+  try {
+    const parsed = updateSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: 'invalid_payload' });
+    const body = parsed.data;
+
+    const auth = await authorizeResource({
+      req,
+      table: 'events',
+      id: req.params.id,
+      requireOwnerForCloser: true,
+    });
+    if (!auth.ok) return res.status(auth.reason === 'not_found' ? 404 : 403).json({ error: auth.reason });
+
+    if (auth.row.status !== 'pendente') {
+      return res.status(409).json({ error: 'event_not_editable' });
+    }
+    // Este hotfix NÃO sincroniza edição com o Google Calendar. Alterar só o
+    // banco deixaria o Prognexo e o Google divergentes silenciosamente —
+    // bloqueia em vez disso.
+    if (auth.row.google_event_id) {
+      return res.status(409).json({ error: 'google_synced_event_not_editable' });
+    }
+
+    const novoInicio = body.inicio ?? auth.row.inicio;
+    let novoFim;
+    if (body.fim !== undefined) {
+      novoFim = body.fim;
+    } else if (body.inicio !== undefined) {
+      const duracaoMs = new Date(auth.row.fim).getTime() - new Date(auth.row.inicio).getTime();
+      novoFim = new Date(new Date(body.inicio).getTime() + duracaoMs).toISOString();
+    } else {
+      novoFim = auth.row.fim;
+    }
+    if (new Date(novoFim) <= new Date(novoInicio)) {
+      return res.status(400).json({ error: 'fim_before_inicio' });
+    }
+
+    const patch = {};
+    if (body.titulo !== undefined) patch.titulo = body.titulo;
+    if (body.tipo !== undefined) patch.tipo = body.tipo;
+    if (body.inicio !== undefined) patch.inicio = body.inicio;
+    if (body.inicio !== undefined || body.fim !== undefined) patch.fim = novoFim;
+
+    const { data, error } = await supabase
+      .from('events')
+      .update(patch)
+      .eq('id', req.params.id)
+      .select('*, leads(nome, telefone, journey_type)')
+      .single();
+    if (error) throw error;
+
+    res.json(data);
+  } catch (e) {
+    next(e);
+  }
+});
+
+// DELETE /events/:id — cancelamento LÓGICO. Nunca apaga a linha (auditoria);
+// só marca status='cancelado'. Idempotente: cancelar de novo não é erro.
+router.delete('/:id', async (req, res, next) => {
+  try {
+    const auth = await authorizeResource({
+      req,
+      table: 'events',
+      id: req.params.id,
+      requireOwnerForCloser: true,
+    });
+    if (!auth.ok) return res.status(auth.reason === 'not_found' ? 404 : 403).json({ error: auth.reason });
+
+    if (auth.row.status === 'cancelado') {
+      return res.json(auth.row);
+    }
+    // Idem à edição: este hotfix não cancela do lado do Google. Cancelar só
+    // no banco deixaria o evento "fantasma" ainda visível no Google.
+    if (auth.row.google_event_id) {
+      return res.status(409).json({ error: 'google_synced_event_not_cancellable' });
+    }
+
+    const { data, error } = await supabase
+      .from('events')
+      .update({ status: 'cancelado' })
+      .eq('id', req.params.id)
+      .select()
+      .single();
+    if (error) throw error;
 
     res.json(data);
   } catch (e) {
