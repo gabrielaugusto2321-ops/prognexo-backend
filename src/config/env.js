@@ -31,6 +31,10 @@ const schema = z.object({
   META_APP_SECRET: optionalSecret,
   META_SYSTEM_USER_TOKEN: optionalSecret,
   WHATSAPP_VERIFY_TOKEN: optionalSecret,
+  // Fonte única da versão da Meta Graph API usada por src/lib/whatsapp.js e
+  // src/lib/embeddedSignup.js. Formato validado (/^v\d+\.\d+$/) pelo próprio
+  // schema — nunca aceita um valor fora do padrão "vNN.N" da Meta.
+  META_GRAPH_API_VERSION: z.string().regex(/^v\d+\.\d+$/).default('v26.0'),
   VOYAGE_API_KEY: optionalSecret,
   RESEND_API_KEY: optionalSecret,
   CRON_SECRET: optionalSecret,

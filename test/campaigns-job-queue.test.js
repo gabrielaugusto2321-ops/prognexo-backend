@@ -375,7 +375,11 @@ describe('handlers de campanha (isolados)', async () => {
         release: async (a) => { calls.release.push(a); },
       },
       send: async (...a) => { calls.send.push(a); if (over.sendThrows) throw Object.assign(new Error('meta_down'), { code: 'meta_down' }); },
-      credentialVault: { readIntegrationCredentials: async () => ({ external_id: 'pn', access_token: 'tok' }) },
+      credentialVault: {
+        resolveWhatsAppSendCredentials: async () => (
+          over.credentials ?? { externalId: 'pn', accessToken: 'tok' }
+        ),
+      },
     };
   }
   const sendJob = (attempts = 0) => ({ id: 'snd', organization_id: ORG, job_type: 'campaign.send_message', attempts, payload: enc({ campaignId: CAMP, leadId: 'L1', doctorId: DOC }, 'snd', true) });

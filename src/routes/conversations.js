@@ -124,15 +124,15 @@ router.post('/send', async (req, res) => {
     return res.status(403).json({ error: 'lead_fora_da_organizacao' });
   }
 
-  let integration;
+  let credentials;
   try {
-    integration = await CredentialVault.readIntegrationCredentials({ doctorId: lead.doctor_id, gateway: 'whatsapp' });
+    credentials = await CredentialVault.resolveWhatsAppSendCredentials({ doctorId: lead.doctor_id });
   } catch (err) {
     req.log?.error({ err }, 'WhatsApp integration credential unreadable');
     return res.status(400).json({ error: 'WhatsApp não configurado para este médico' });
   }
 
-  if (!integration?.external_id) {
+  if (!credentials.externalId) {
     return res.status(400).json({ error: 'WhatsApp não configurado para este médico' });
   }
 
@@ -140,7 +140,7 @@ router.post('/send', async (req, res) => {
   // Integrações), usa esse. Se conectou pelo Embedded Signup, não existe
   // token próprio — usa o token fixo do usuário de sistema, que já tem
   // permissão sobre a WABA dele (compartilhada automaticamente no fluxo).
-  const accessToken = integration.access_token || process.env.META_SYSTEM_USER_TOKEN;
+  const accessToken = credentials.accessToken;
   if (!accessToken) {
     return res.status(400).json({ error: 'Nenhum token de envio disponível para este médico' });
   }
@@ -169,7 +169,7 @@ router.post('/send', async (req, res) => {
   }
 
   try {
-    await sendWhatsAppMessage(integration.external_id, accessToken, lead.telefone, texto.trim());
+    await sendWhatsAppMessage(credentials.externalId, accessToken, lead.telefone, texto.trim());
   } catch (err) {
     req.log?.error({ err }, 'WhatsApp send failed');
     return res.status(502).json({ error: 'whatsapp_send_failed', requestId: req.id });

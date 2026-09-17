@@ -151,10 +151,10 @@ export async function handleCampaignSendJob(job, {
   try {
     let doctorId;
     ({ campaignId, leadId, doctorId } = queue.decodePayload(job, { sensitive: true }));
-    const [{ data: campaign }, { data: lead }, integration] = await Promise.all([
+    const [{ data: campaign }, { data: lead }, credentials] = await Promise.all([
       client.from('campanhas').select('*').eq('id', campaignId).single(),
       client.from('leads').select('id,telefone').eq('id', leadId).maybeSingle(),
-      credentialVault.readIntegrationCredentials({ doctorId, gateway: 'whatsapp' }),
+      credentialVault.resolveWhatsAppSendCredentials({ doctorId }),
     ]);
 
     // Campanha cancelada entre o dispatch e o send -> não envia (defensivo:
@@ -174,7 +174,7 @@ export async function handleCampaignSendJob(job, {
       await queue.complete({ jobId: job.id, workerId });
       return true;
     }
-    if (!campaign || !integration?.external_id || !integration?.access_token) {
+    if (!campaign || !credentials?.externalId || !credentials?.accessToken) {
       throw Object.assign(new Error('missing_resource'), { code: 'missing_resource' });
     }
 
@@ -200,7 +200,7 @@ export async function handleCampaignSendJob(job, {
     reservationId = reservation.reservationId;
 
     externalStarted = true; // a partir daqui a mensagem PODE ter saído — nunca liberamos a reserva
-    await send(integration.external_id, integration.access_token, lead.telefone, campaign.mensagem);
+    await send(credentials.externalId, credentials.accessToken, lead.telefone, campaign.mensagem);
     await quota.settle({ reservationId, actualQuantity: 1, estimatedCost: null, idempotencyKey: `settle:${job.id}` });
 
     await client.from('conversations').insert({

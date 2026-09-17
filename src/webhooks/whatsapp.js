@@ -74,10 +74,13 @@ router.post('/', async (req, res) => {
 
     if (!integration) return; // número ainda não vinculado a nenhum médico
 
-    // Token de envio resolvido pela camada de credenciais (descriptografa se cifrado).
+    // Token de envio resolvido pela mesma precedência dos outros 3 caminhos
+    // de envio: token individual da integração (via mecanismo de
+    // descriptografia existente) primeiro, fallback para META_SYSTEM_USER_TOKEN.
     let integrationAccessToken = null;
     try {
-      integrationAccessToken = CredentialVault.readIntegrationCredentialsFromRow(integration, ['access_token']).access_token;
+      const individualToken = CredentialVault.readIntegrationCredentialsFromRow(integration, ['access_token']).access_token;
+      integrationAccessToken = CredentialVault.resolveEffectiveWhatsAppToken(individualToken);
     } catch (err) {
       logger.error({ err }, 'WhatsApp integration credential unreadable');
       return; // falha fechada — não tenta enviar sem token confiável
@@ -236,7 +239,7 @@ router.post('/', async (req, res) => {
       const pausaMs = Math.min(4000, 600 + resultado.resposta.length * 20);
       await new Promise((resolve) => setTimeout(resolve, pausaMs));
 
-      const accessToken = integrationAccessToken || process.env.META_SYSTEM_USER_TOKEN;
+      const accessToken = integrationAccessToken;
       if (accessToken) {
         try {
           await sendWhatsAppMessage(integration.external_id, accessToken, telefoneNormalizado, resultado.resposta);

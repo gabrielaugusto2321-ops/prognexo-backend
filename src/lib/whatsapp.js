@@ -1,11 +1,11 @@
-const GRAPH_API_VERSION = 'v20.0';
+import { env } from '../config/env.js';
 
 // Envia uma mensagem de texto livre pelo número (phone_number_id) e token
 // de acesso de um médico específico. Só funciona dentro da janela de 24h
 // desde a última mensagem RECEBIDA do lead — fora disso a Meta rejeita
 // com erro de "re-engagement message" e exige um template aprovado.
 export async function sendWhatsAppMessage(phoneNumberId, accessToken, to, texto) {
-  const url = `https://graph.facebook.com/${GRAPH_API_VERSION}/${phoneNumberId}/messages`;
+  const url = `https://graph.facebook.com/${env.META_GRAPH_API_VERSION}/${phoneNumberId}/messages`;
 
   const resp = await fetch(url, {
     method: 'POST',

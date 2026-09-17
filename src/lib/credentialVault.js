@@ -235,6 +235,25 @@ export const CredentialVault = {
     return out;
   },
 
+  // Precedência ÚNICA do token efetivo de envio do WhatsApp, usada pelos 4
+  // caminhos de envio (conversa manual, campanha legada, worker
+  // campaignSendHandler, resposta da IA pelo webhook): token individual já
+  // resolvido (plaintext ou decifrado pelo mecanismo existente) primeiro,
+  // fallback para META_SYSTEM_USER_TOKEN. Nunca loga o valor.
+  resolveEffectiveWhatsAppToken(individualToken, systemToken = env.META_SYSTEM_USER_TOKEN) {
+    return individualToken || systemToken || null;
+  },
+
+  // Variante que também busca a integração no banco (usada pelos caminhos
+  // que ainda não tinham a linha da integração em mãos). A descriptografia
+  // do token individual acontece dentro de readIntegrationCredentials —
+  // nunca reimplementada aqui.
+  async resolveWhatsAppSendCredentials({ doctorId, systemToken = env.META_SYSTEM_USER_TOKEN }) {
+    const integration = await this.readIntegrationCredentials({ doctorId, gateway: 'whatsapp' });
+    const accessToken = this.resolveEffectiveWhatsAppToken(integration?.access_token, systemToken);
+    return { externalId: integration?.external_id ?? null, accessToken };
+  },
+
   async readIntegrationCredentials({ doctorId, gateway }) {
     const { data, error } = await supabase
       .from('integrations')

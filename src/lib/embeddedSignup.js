@@ -1,4 +1,4 @@
-const GRAPH_API_VERSION = 'v20.0';
+import { env } from '../config/env.js';
 
 // Troca o "code" que o Embedded Signup devolve no navegador por um access
 // token de usuário. Esse token não é o que usamos pra enviar mensagem no
@@ -10,7 +10,7 @@ export async function exchangeCodeForToken(code) {
     client_secret: process.env.META_APP_SECRET,
     code,
   });
-  const resp = await fetch(`https://graph.facebook.com/${GRAPH_API_VERSION}/oauth/access_token?${params}`);
+  const resp = await fetch(`https://graph.facebook.com/${env.META_GRAPH_API_VERSION}/oauth/access_token?${params}`);
   const data = await resp.json();
   if (!resp.ok) {
     throw new Error(data?.error?.message || 'Erro ao trocar code por token');
@@ -22,7 +22,7 @@ export async function exchangeCodeForToken(code) {
 // enviar/receber mensagem por ele. O PIN é qualquer sequência de 6 dígitos
 // que você escolhe (fica salvo do lado da Meta, não precisa lembrar depois).
 export async function registerPhoneNumber(phoneNumberId) {
-  const url = `https://graph.facebook.com/${GRAPH_API_VERSION}/${phoneNumberId}/register`;
+  const url = `https://graph.facebook.com/${env.META_GRAPH_API_VERSION}/${phoneNumberId}/register`;
   const resp = await fetch(url, {
     method: 'POST',
     headers: {
@@ -41,7 +41,7 @@ export async function registerPhoneNumber(phoneNumberId) {
 // Inscreve o nosso app pra receber webhook (mensagem recebida, status de
 // entrega) dessa WABA específica. Sem isso o número fica mudo pro nosso lado.
 export async function subscribeAppToWaba(wabaId) {
-  const url = `https://graph.facebook.com/${GRAPH_API_VERSION}/${wabaId}/subscribed_apps`;
+  const url = `https://graph.facebook.com/${env.META_GRAPH_API_VERSION}/${wabaId}/subscribed_apps`;
   const resp = await fetch(url, {
     method: 'POST',
     headers: { Authorization: `Bearer ${process.env.META_SYSTEM_USER_TOKEN}` },

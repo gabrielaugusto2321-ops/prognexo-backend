@@ -66,7 +66,7 @@ router.post('/', async (req, res) => {
 // responde 202 na hora) — assim uma campanha grande não estoura o timeout de
 // request nem segura um worker. É seguro reprocessar: o ledger `campanha_envios`
 // (unique campanha+lead) garante que ninguém recebe a mesma mensagem duas vezes.
-async function processarEnvioCampanha(campanha, integration, accessToken, log) {
+async function processarEnvioCampanha(campanha, externalId, accessToken, log) {
   try {
     let leadsQuery = supabase.from('leads').select('id, nome, telefone').eq('doctor_id', campanha.doctor_id);
     if (campanha.filtro_status) leadsQuery = leadsQuery.eq('status_atual', campanha.filtro_status);
@@ -112,7 +112,7 @@ async function processarEnvioCampanha(campanha, integration, accessToken, log) {
       }
 
       try {
-        await sendWhatsAppMessage(integration.external_id, accessToken, lead.telefone, campanha.mensagem);
+        await sendWhatsAppMessage(externalId, accessToken, lead.telefone, campanha.mensagem);
         await supabase.from('conversations').insert({
           lead_id: lead.id,
           canal: 'whatsapp',
@@ -184,16 +184,16 @@ router.post('/:id/enviar', async (req, res) => {
     return res.status(409).json({ error: 'tenant_backfill_required' });
   }
 
-  let integration;
+  let credentials;
   try {
-    integration = await CredentialVault.readIntegrationCredentials({ doctorId: campanhaBase.doctor_id, gateway: 'whatsapp' });
+    credentials = await CredentialVault.resolveWhatsAppSendCredentials({ doctorId: campanhaBase.doctor_id });
   } catch (err) {
     req.log?.error({ err }, 'WhatsApp integration credential unreadable');
     return res.status(400).json({ error: 'WhatsApp não configurado para este médico' });
   }
 
-  const accessToken = integration?.access_token || process.env.META_SYSTEM_USER_TOKEN;
-  if (!integration?.external_id || !accessToken) {
+  const { externalId, accessToken } = credentials;
+  if (!externalId || !accessToken) {
     return res.status(400).json({ error: 'WhatsApp não configurado para este médico' });
   }
 
@@ -248,7 +248,7 @@ router.post('/:id/enviar', async (req, res) => {
 
   // --- legado (flag OFF): 202 imediato + loop destacado, inalterado ---
   res.status(202).json({ id: campanha.id, status: 'processando' });
-  processarEnvioCampanha(campanha, integration, accessToken, req.log);
+  processarEnvioCampanha(campanha, externalId, accessToken, req.log);
 });
 
 export default router;
