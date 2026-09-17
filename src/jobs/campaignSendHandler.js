@@ -3,6 +3,7 @@ import { sendWhatsAppMessage } from '../lib/whatsapp.js';
 import { CredentialVault } from '../lib/credentialVault.js';
 import { jobQueue } from '../lib/jobQueue.js';
 import { usageQuota } from '../lib/usageQuota.js';
+import { resolveCanonicalSendPhone, isPhoneIdentityReviewRequired } from '../lib/phoneNormalization.js';
 
 const safeCode = (err) => String(err?.code || err?.message || err?.name || 'campaign_job_failed')
   .toLowerCase().replace(/[^a-z0-9_]/g, '_').slice(0, 64) || 'campaign_job_failed';
@@ -25,6 +26,14 @@ async function markEnvio(client, campaignId, leadId, status, extra = {}) {
 const DISPATCH_BATCH = 500;
 const FINALIZE_MAX_ATTEMPTS = 200; // ~3.3h de poll a 60s antes de dead_letter
 
+async function importedLeadIds(client, importId) {
+  if (!importId) return null;
+  const { data, error } = await client.from('lead_import_rows').select('lead_id')
+    .eq('import_id', importId).in('status', ['criado', 'atualizado']);
+  if (error) throw error;
+  return [...new Set((data || []).map((row) => row.lead_id).filter(Boolean))];
+}
+
 // ---------------------------------------------------------------------------
 // campaign.dispatch — pagina os leads e enfileira 1 campaign.send_message por
 // destinatário NOVO. Totalmente retomável: `campanha_envios` (unique
@@ -41,13 +50,22 @@ export async function handleCampaignDispatchJob(job, {
     const { data: campaign } = await client.from('campanhas').select('*').eq('id', campaignId).single();
     if (!campaign) { await queue.complete({ jobId: job.id, workerId }); return true; }
     if (campaign.status === 'cancelada') { await queue.complete({ jobId: job.id, workerId }); return true; }
+    const importIds = await importedLeadIds(client, campaign.import_id);
+    if (importIds && importIds.length === 0) {
+      await queue.enqueue('campaign.finalize', { campaignId: campaign.id, dispatchKey: job.idempotency_key },
+        { organizationId: campaign.organization_id, idempotencyKey: `finalize:${job.idempotency_key}`, maxAttempts: FINALIZE_MAX_ATTEMPTS, priority: -1 });
+      await queue.complete({ jobId: job.id, workerId });
+      return true;
+    }
 
     // Paginação estável por leads.id (uuid — ordem arbitrária mas
     // determinística; `id > cursor` varre tudo uma vez).
     let cursor = null;
     for (;;) {
-      let q = client.from('leads').select('id').eq('doctor_id', campaign.doctor_id).order('id', { ascending: true }).limit(batchSize);
+      let q = client.from('leads').select('id').eq('doctor_id', campaign.doctor_id)
+        .eq('whatsapp_authorization_status', 'autorizado').order('id', { ascending: true }).limit(batchSize);
       if (campaign.filtro_status) q = q.eq('status_atual', campaign.filtro_status);
+      if (importIds) q = q.in('id', importIds);
       if (cursor) q = q.gt('id', cursor);
       const { data: leads, error } = await q;
       if (error) throw error;
@@ -153,7 +171,7 @@ export async function handleCampaignSendJob(job, {
     ({ campaignId, leadId, doctorId } = queue.decodePayload(job, { sensitive: true }));
     const [{ data: campaign }, { data: lead }, credentials] = await Promise.all([
       client.from('campanhas').select('*').eq('id', campaignId).single(),
-      client.from('leads').select('id,telefone').eq('id', leadId).maybeSingle(),
+      client.from('leads').select('id,doctor_id,telefone,telefone_normalizado,whatsapp_authorization_status,dados_extraidos').eq('id', leadId).maybeSingle(),
       credentialVault.resolveWhatsAppSendCredentials({ doctorId }),
     ]);
 
@@ -178,6 +196,18 @@ export async function handleCampaignSendJob(job, {
       throw Object.assign(new Error('missing_resource'), { code: 'missing_resource' });
     }
 
+    let blockedStatus = null;
+    if (lead.doctor_id !== campaign.doctor_id || lead.doctor_id !== doctorId) blockedStatus = 'sem_autorizacao';
+    else if (isPhoneIdentityReviewRequired(lead)) blockedStatus = 'phone_identity_review_required';
+    else if (lead.whatsapp_authorization_status === 'opt_out') blockedStatus = 'opt_out';
+    else if (lead.whatsapp_authorization_status !== 'autorizado') blockedStatus = 'sem_autorizacao';
+    else if (!resolveCanonicalSendPhone(lead).ok) blockedStatus = 'invalid_recipient_phone';
+    if (blockedStatus) {
+      await markEnvio(client, campaignId, leadId, blockedStatus);
+      await queue.complete({ jobId: job.id, workerId });
+      return true;
+    }
+
     // Janela de 24h do WhatsApp: fora dela vira 'pendente_template' e o job
     // completa (não é falha, não reserva quota).
     const { data: lastInbound } = await client.from('conversations')
@@ -199,8 +229,26 @@ export async function handleCampaignSendJob(job, {
     if (!reservation.allowed) throw Object.assign(new Error('quota_denied'), { code: 'quota_denied' });
     reservationId = reservation.reservationId;
 
+    const { data: freshLead } = await client.from('leads')
+      .select('id,doctor_id,telefone,telefone_normalizado,whatsapp_authorization_status,dados_extraidos')
+      .eq('id', leadId).maybeSingle();
+    const destino = freshLead ? resolveCanonicalSendPhone(freshLead) : { ok: false };
+    let finalBlock = null;
+    if (!freshLead || freshLead.doctor_id !== campaign.doctor_id || freshLead.doctor_id !== doctorId) finalBlock = 'sem_autorizacao';
+    else if (isPhoneIdentityReviewRequired(freshLead)) finalBlock = 'phone_identity_review_required';
+    else if (freshLead.whatsapp_authorization_status === 'opt_out') finalBlock = 'opt_out';
+    else if (freshLead.whatsapp_authorization_status !== 'autorizado') finalBlock = 'sem_autorizacao';
+    else if (!destino.ok) finalBlock = 'invalid_recipient_phone';
+    if (finalBlock) {
+      await quota.release({ reservationId });
+      reservationId = null;
+      await markEnvio(client, campaignId, leadId, finalBlock);
+      await queue.complete({ jobId: job.id, workerId });
+      return true;
+    }
+
     externalStarted = true; // a partir daqui a mensagem PODE ter saído — nunca liberamos a reserva
-    await send(credentials.externalId, credentials.accessToken, lead.telefone, campaign.mensagem);
+    await send(credentials.externalId, credentials.accessToken, destino.phone, campaign.mensagem);
     await quota.settle({ reservationId, actualQuantity: 1, estimatedCost: null, idempotencyKey: `settle:${job.id}` });
 
     await client.from('conversations').insert({

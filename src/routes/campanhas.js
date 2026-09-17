@@ -6,6 +6,7 @@ import { attachTenantContext, tenantAllowsDoctor } from '../lib/tenantContext.js
 import { CredentialVault } from '../lib/credentialVault.js';
 import { env } from '../config/env.js';
 import { jobQueue } from '../lib/jobQueue.js';
+import { resolveCanonicalSendPhone, isPhoneIdentityReviewRequired } from '../lib/phoneNormalization.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -14,6 +15,31 @@ router.use(attachTenantContext);
 async function checarAcesso(req, doctorId) {
   return tenantAllowsDoctor(req, doctorId, getScopedDoctorIds);
 }
+
+async function importLeadIds(importId, client = supabase) {
+  if (!importId) return null;
+  const { data, error } = await client.from('lead_import_rows').select('lead_id')
+    .eq('import_id', importId).in('status', ['criado', 'atualizado']);
+  if (error) throw error;
+  return [...new Set((data || []).map((row) => row.lead_id).filter(Boolean))];
+}
+
+async function campaignCounts(campaign) {
+  const ids = await importLeadIds(campaign.import_id);
+  if (ids && !ids.length) return { elegiveis: 0, bloqueados: 0 };
+  let query = supabase.from('leads').select('id, telefone, telefone_normalizado, whatsapp_authorization_status')
+    .eq('doctor_id', campaign.doctor_id);
+  if (campaign.filtro_status) query = query.eq('status_atual', campaign.filtro_status);
+  if (ids) query = query.in('id', ids);
+  const { data, error } = await query;
+  if (error) throw error;
+  const all = data || [];
+  const elegiveis = all.filter((lead) => lead.whatsapp_authorization_status === 'autorizado'
+    && resolveCanonicalSendPhone(lead).ok).length;
+  return { elegiveis, bloqueados: all.length - elegiveis };
+}
+
+const enrichCampaign = async (campaign) => ({ ...campaign, ...(await campaignCounts(campaign)) });
 
 // GET /campanhas?doctor_id=
 router.get('/', async (req, res) => {
@@ -28,22 +54,40 @@ router.get('/', async (req, res) => {
     .order('criado_em', { ascending: false });
 
   if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
-  res.json(data);
+  res.json(await Promise.all((data || []).map(enrichCampaign)));
+});
+
+router.get('/:id', async (req, res) => {
+  const { data, error } = await supabase.from('campanhas').select('*').eq('id', req.params.id).maybeSingle();
+  if (error) return res.status(500).json({ error: 'internal_error', requestId: req.id });
+  if (!data) return res.status(404).json({ error: 'campanha_not_found' });
+  if (!(await checarAcesso(req, data.doctor_id))) return res.status(403).json({ error: 'forbidden' });
+  res.json(await enrichCampaign(data));
 });
 
 // POST /campanhas  { doctor_id, nome, mensagem, filtro_status }
 // Cria como rascunho — o disparo de verdade acontece em /campanhas/:id/enviar,
 // separado, pra dar chance de revisar antes de sair mandando mensagem.
 router.post('/', async (req, res) => {
-  const { doctor_id, nome, mensagem, filtro_status } = req.body;
+  const { doctor_id, nome, mensagem, filtro_status, import_id } = req.body;
   if (!doctor_id || !nome?.trim() || !mensagem?.trim()) {
     return res.status(400).json({ error: 'doctor_id, nome e mensagem são obrigatórios' });
   }
   if (!(await checarAcesso(req, doctor_id))) return res.status(403).json({ error: 'Sem acesso a este médico' });
 
-  let leadsQuery = supabase.from('leads').select('id', { count: 'exact' }).eq('doctor_id', doctor_id);
+  if (import_id && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(import_id)) {
+    return res.status(400).json({ error: 'import_id_invalido' });
+  }
+  if (import_id) {
+    const { data: imported } = await supabase.from('lead_imports').select('id, doctor_id').eq('id', import_id).maybeSingle();
+    if (!imported) return res.status(404).json({ error: 'import_not_found' });
+    if (imported.doctor_id !== doctor_id) return res.status(403).json({ error: 'import_doctor_mismatch' });
+  }
+  const ids = await importLeadIds(import_id);
+  let leadsQuery = supabase.from('leads').select('id').eq('doctor_id', doctor_id);
   if (filtro_status) leadsQuery = leadsQuery.eq('status_atual', filtro_status);
-  const { count } = await leadsQuery;
+  if (ids) leadsQuery = leadsQuery.in('id', ids);
+  const { data: baseLeads } = await leadsQuery;
 
   const { data, error } = await supabase
     .from('campanhas')
@@ -52,24 +96,28 @@ router.post('/', async (req, res) => {
       nome: nome.trim(),
       mensagem: mensagem.trim(),
       filtro_status: filtro_status || null,
-      total_leads: count || 0,
+      total_leads: baseLeads?.length || 0,
+      import_id: import_id || null,
       ...(req.tenant?.enabled && req.tenant.organizationId ? { organization_id: req.tenant.organizationId } : {}),
     })
     .select()
     .single();
 
   if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
-  res.json(data);
+  res.json(await enrichCampaign(data));
 });
 
 // Processa o envio da campanha. Roda DESTACADO da requisição HTTP (a rota
 // responde 202 na hora) — assim uma campanha grande não estoura o timeout de
 // request nem segura um worker. É seguro reprocessar: o ledger `campanha_envios`
 // (unique campanha+lead) garante que ninguém recebe a mesma mensagem duas vezes.
-async function processarEnvioCampanha(campanha, externalId, accessToken, log) {
+export async function processarEnvioCampanha(campanha, externalId, accessToken, log) {
   try {
-    let leadsQuery = supabase.from('leads').select('id, nome, telefone').eq('doctor_id', campanha.doctor_id);
+    const ids = await importLeadIds(campanha.import_id);
+    let leadsQuery = supabase.from('leads').select('id, nome, telefone_normalizado')
+      .eq('doctor_id', campanha.doctor_id).eq('whatsapp_authorization_status', 'autorizado');
     if (campanha.filtro_status) leadsQuery = leadsQuery.eq('status_atual', campanha.filtro_status);
+    if (ids) leadsQuery = leadsQuery.in('id', ids);
     const { data: leads, error: leadsError } = await leadsQuery;
     if (leadsError) throw leadsError;
 
@@ -111,8 +159,24 @@ async function processarEnvioCampanha(campanha, externalId, accessToken, log) {
         continue;
       }
 
+      const { data: freshLead } = await supabase.from('leads')
+        .select('id, doctor_id, telefone, telefone_normalizado, whatsapp_authorization_status, dados_extraidos')
+        .eq('id', lead.id).maybeSingle();
+      const destino = freshLead ? resolveCanonicalSendPhone(freshLead) : { ok: false };
+      let blockedStatus = null;
+      if (!freshLead || freshLead.doctor_id !== campanha.doctor_id) blockedStatus = 'sem_autorizacao';
+      else if (isPhoneIdentityReviewRequired(freshLead)) blockedStatus = 'phone_identity_review_required';
+      else if (freshLead.whatsapp_authorization_status === 'opt_out') blockedStatus = 'opt_out';
+      else if (freshLead.whatsapp_authorization_status !== 'autorizado') blockedStatus = 'sem_autorizacao';
+      else if (!destino.ok) blockedStatus = 'invalid_recipient_phone';
+      if (blockedStatus) {
+        await supabase.from('campanha_envios').update({ status: blockedStatus })
+          .eq('campanha_id', campanha.id).eq('lead_id', lead.id);
+        continue;
+      }
+
       try {
-        await sendWhatsAppMessage(externalId, accessToken, lead.telefone, campanha.mensagem);
+        await sendWhatsAppMessage(externalId, accessToken, destino.phone, campanha.mensagem);
         await supabase.from('conversations').insert({
           lead_id: lead.id,
           canal: 'whatsapp',

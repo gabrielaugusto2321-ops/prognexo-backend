@@ -10,8 +10,18 @@ import { CredentialVault } from '../lib/credentialVault.js';
 import { webhookIdempotencyReady } from '../lib/readiness.js';
 import { env } from '../config/env.js';
 import { logger } from '../lib/logger.js';
+import { normalizeBrazilianPhone, resolveCanonicalSendPhone, isPhoneIdentityReviewRequired } from '../lib/phoneNormalization.js';
+import { resolveQuarantineLead } from '../lib/phoneIdentityQuarantine.js';
+
+const LEAD_IDENTITY_SELECT = 'id, status_atual, atendido_por, ia_mensagens_enviadas, ia_sem_resposta_count, telefone, telefone_normalizado, whatsapp_wa_id, dados_extraidos';
 
 const router = Router();
+
+const OPT_OUT_WORDS = new Set(['PARAR', 'SAIR', 'STOP', 'CANCELAR']);
+export function isWhatsAppOptOut(text) {
+  const normalized = String(text ?? '').trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+  return OPT_OUT_WORDS.has(normalized);
+}
 
 // GET /webhooks/whatsapp — verificação exigida pela Meta ao registrar o webhook
 router.get('/', (req, res) => {
@@ -101,22 +111,122 @@ router.post('/', async (req, res) => {
       contactsPorTelefone[c.wa_id] = c.profile?.name;
     }
 
-    for (const msg of messages) {
+    for (const [msgIndex, msg] of messages.entries()) {
       if (!msg.id) continue;
       const claimId = await claimWebhookEvent({ provider: 'whatsapp', externalEventId: msg.id, signatureValid, rawBody: req.rawBody });
       if (!claimId) continue;
-      const telefoneNormalizado = msg.from?.replace(/\D/g, '');
+
+      // Identidade do remetente: preferimos o wa_id do objeto `contacts`
+      // (correspondência posicional com `messages`, conforme o formato do
+      // webhook da Meta) e caímos para `from` só se não houver contato
+      // correspondente. Ambos são normalizados para dígitos apenas — nenhuma
+      // lógica de nono dígito acontece aqui, só em normalizeBrazilianPhone.
+      const waIdBruto = (value?.contacts?.[msgIndex]?.wa_id ?? msg.from ?? '').replace(/\D/g, '');
+      const fromBruto = (msg.from ?? '').replace(/\D/g, '');
+      const rawDigits = waIdBruto || fromBruto;
+      const identidade = normalizeBrazilianPhone(rawDigits);
+      const canonical = identidade.valid ? identidade.canonical : null;
       const conteudo = msg.text?.body ?? `[${msg.type}]`;
 
-      let { data: lead } = await supabase
-        .from('leads')
-        .select('id, status_atual, atendido_por, ia_mensagens_enviadas, ia_sem_resposta_count')
-        .eq('doctor_id', integration.doctor_id)
-        .eq('telefone', telefoneNormalizado)
-        .maybeSingle();
+      // 1) Correspondência exata por whatsapp_wa_id — já vinculado antes,
+      //    nunca ambígua (índice único parcial por doctor_id+wa_id).
+      let lead = null;
+      if (rawDigits) {
+        const { data } = await supabase.from('leads').select(LEAD_IDENTITY_SELECT)
+          .eq('doctor_id', integration.doctor_id).eq('whatsapp_wa_id', rawDigits).maybeSingle();
+        lead = data;
+      }
+
+      // 2) Telefone canônico (E.164) já resolvido para este médico.
+      if (!lead && canonical) {
+        const { data } = await supabase.from('leads').select(LEAD_IDENTITY_SELECT)
+          .eq('doctor_id', integration.doctor_id).eq('telefone_normalizado', canonical).maybeSingle();
+        lead = data;
+      }
+
+      // 3) Formatos legados equivalentes do MESMO médico (telefone bruto
+      //    gravado antes desta identidade existir). Nunca cruza doctor_id.
+      //    Mais de um candidato aqui é ambiguidade real — não escolhemos por
+      //    conta própria, registramos e pulamos a mensagem.
+      let ambiguo = false;
+      if (!lead) {
+        const candidatosLegado = new Set([rawDigits, fromBruto].filter(Boolean));
+        if (identidade.valid) candidatosLegado.add(identidade.national);
+        if (candidatosLegado.size > 0) {
+          const { data: legados } = await supabase.from('leads').select(LEAD_IDENTITY_SELECT)
+            .eq('doctor_id', integration.doctor_id).in('telefone', [...candidatosLegado]);
+          const distintos = legados || [];
+          if (distintos.length === 1) lead = distintos[0];
+          else if (distintos.length > 1) ambiguo = true;
+        }
+      }
+
+      if (ambiguo) {
+        // Log sanitizado: nunca o telefone completo, nunca a lista de
+        // candidatos — só médico + últimos 4 dígitos, o suficiente para
+        // revisão manual sem vazar PII.
+        logger.error(
+          { doctorId: integration.doctor_id, last4: rawDigits.slice(-4) },
+          'WhatsApp inbound: identidade de telefone ambígua — lead de quarentena usado, nunca unida automaticamente'
+        );
+
+        // NUNCA descarta a mensagem: cria ou reutiliza um lead de quarentena
+        // pela mesma chave exata (doctor_id + whatsapp_wa_id) que a busca 1)
+        // já usa. A função trata a corrida entre duas mensagens concorrentes
+        // do mesmo wa_id (índice único parcial da migration 0016) sem nunca
+        // virar erro 500 nem duplicar o lead.
+        let quarentena;
+        let quarentenaCriadaAgora = false;
+        try {
+          const resolvido = await resolveQuarantineLead({
+            supabase,
+            doctorId: integration.doctor_id,
+            organizationId: integration.organization_id,
+            rawDigits,
+            telefoneOriginal: msg.from || rawDigits,
+            nome: contactsPorTelefone[msg.from] || rawDigits,
+            select: LEAD_IDENTITY_SELECT,
+          });
+          quarentena = resolvido.lead;
+          quarentenaCriadaAgora = resolvido.created;
+        } catch (err) {
+          // Falha explícita e sanitizada — nunca o telefone, nunca a
+          // mensagem de erro do banco (pode conter a chave no DETAIL), só o
+          // código. O webhook_events desta mensagem fica 'processing'
+          // (preservado) para o mecanismo idempotente existente; a IA nunca
+          // é chamada para esta mensagem.
+          logger.error(
+            { doctorId: integration.doctor_id, last4: rawDigits.slice(-4), code: err?.code || 'quarantine_lead_failed' },
+            'WhatsApp inbound: falha ao resolver lead de quarentena — mensagem preservada para retry, IA não chamada'
+          );
+          continue;
+        }
+
+        lead = quarentena;
+
+        // O deal só é criado na primeira vez (lead novo) — uma mensagem
+        // posterior do mesmo wa_id (reutilizando o mesmo lead de quarentena,
+        // seja por já existir, seja por ter perdido a corrida concorrente)
+        // nunca duplica o deal.
+        if (quarentenaCriadaAgora) {
+          await supabase.from('deals').insert({ lead_id: lead.id, etapa: 'lead' });
+        }
+        await supabase.from('conversations').insert({
+          lead_id: lead.id,
+          canal: 'whatsapp',
+          direcao: 'recebida',
+          conteudo,
+          origem: 'automatico',
+          timestamp_msg: new Date(Number(msg.timestamp) * 1000).toISOString(),
+        });
+        continue; // conversa gravada; IA nunca responde a um lead em quarentena
+      }
 
       // Número novo, ainda sem lead cadastrado — cria automaticamente em vez
       // de descartar a mensagem, pra nenhuma conversa recebida se perder.
+      // Telefone original é preservado como veio; whatsapp_wa_id guarda o
+      // identificador bruto da Meta; telefone_normalizado só é gravado
+      // quando a conversão é determinística (nunca um valor ambíguo/parcial).
       if (!lead) {
         const { data: novoLead } = await supabase
           .from('leads')
@@ -124,18 +234,31 @@ router.post('/', async (req, res) => {
             doctor_id: integration.doctor_id,
             // tenant herdado da integração (resolução confiável do servidor)
             ...(integration.organization_id ? { organization_id: integration.organization_id } : {}),
-            telefone: telefoneNormalizado,
-            nome: contactsPorTelefone[msg.from] || telefoneNormalizado,
+            telefone: msg.from || rawDigits,
+            whatsapp_wa_id: rawDigits || null,
+            ...(canonical ? { telefone_normalizado: canonical } : {}),
+            nome: contactsPorTelefone[msg.from] || rawDigits,
             status_atual: 'lead',
             journey_type: 'low_ticket',
           })
-          .select('id, status_atual, atendido_por, ia_mensagens_enviadas, ia_sem_resposta_count')
+          .select(LEAD_IDENTITY_SELECT)
           .single();
 
         if (!novoLead) continue;
         lead = novoLead;
 
         await supabase.from('deals').insert({ lead_id: lead.id, etapa: 'lead' });
+      } else {
+        // Lead reaproveitado (achado por wa_id, canônico ou legado): só
+        // preenche o que ainda está vazio — nunca sobrescreve um valor já
+        // gravado, e nunca substitui uma identidade diferente da que já tem.
+        const patch = {};
+        if (!lead.whatsapp_wa_id && rawDigits) patch.whatsapp_wa_id = rawDigits;
+        if (!lead.telefone_normalizado && canonical) patch.telefone_normalizado = canonical;
+        if (Object.keys(patch).length > 0) {
+          await supabase.from('leads').update(patch).eq('id', lead.id);
+          lead = { ...lead, ...patch };
+        }
       }
 
       await supabase.from('conversations').insert({
@@ -147,15 +270,44 @@ router.post('/', async (req, res) => {
         timestamp_msg: new Date(Number(msg.timestamp) * 1000).toISOString(),
       });
 
+      if (msg.type === 'text' && isWhatsAppOptOut(msg.text?.body)) {
+        await supabase.from('leads').update({
+          whatsapp_authorization_status: 'opt_out',
+          whatsapp_authorization_at: new Date().toISOString(),
+          whatsapp_authorization_source: 'whatsapp_message',
+        }).eq('id', lead.id);
+        continue;
+      }
+
       if (lead.status_atual === 'lead') {
         await supabase.from('leads').update({ status_atual: 'conversa_iniciada' }).eq('id', lead.id);
         await supabase.from('deals').update({ etapa: 'conversa_iniciada' }).eq('lead_id', lead.id);
       }
 
       // ---- Atendimento por IA ----
-      // Só entra em ação se o médico tiver ativado, e se a conversa ainda
-      // não tiver sido assumida por um closer humano (atendido_por='humano').
-      const iaDeveResponder = doctor?.ia_atendimento_ativo && lead.atendido_por !== 'humano';
+      // Recarrega o status de autorização mais recente antes de decidir —
+      // pode ter mudado (opt-out) entre a resolução do lead e este ponto, ou
+      // numa mensagem anterior deste mesmo lote (correção 2 da FASE 1: o
+      // bloqueio de IA precisa ser durável para o lead, não só para a
+      // mensagem de opt-out em si). A conversa recebida já foi gravada acima
+      // — continua visível para atendimento humano mesmo quando a IA é
+      // bloqueada aqui; só a resposta AUTOMÁTICA é interrompida.
+      const { data: leadAtual } = await supabase
+        .from('leads')
+        .select('whatsapp_authorization_status, dados_extraidos')
+        .eq('id', lead.id)
+        .maybeSingle();
+      const statusAutorizacao = leadAtual?.whatsapp_authorization_status ?? 'pendente';
+      const bloqueadoPorConsentimento = statusAutorizacao === 'opt_out' || statusAutorizacao === 'recusado';
+      // Lead em quarentena de identidade (telefone ambíguo) nunca recebe
+      // resposta automática — nenhum envio à Meta até revisão humana.
+      const bloqueadoPorIdentidade = isPhoneIdentityReviewRequired(leadAtual);
+
+      // Só entra em ação se o médico tiver ativado, a conversa ainda não
+      // tiver sido assumida por um closer humano (atendido_por='humano'), o
+      // lead não estiver com consentimento recusado/opt_out, e a identidade
+      // do telefone não estiver em revisão.
+      const iaDeveResponder = !bloqueadoPorConsentimento && !bloqueadoPorIdentidade && doctor?.ia_atendimento_ativo && lead.atendido_por !== 'humano';
       if (!iaDeveResponder) continue;
 
       const { data: historico } = await supabase
@@ -240,9 +392,12 @@ router.post('/', async (req, res) => {
       await new Promise((resolve) => setTimeout(resolve, pausaMs));
 
       const accessToken = integrationAccessToken;
-      if (accessToken) {
+      const destino = resolveCanonicalSendPhone(lead);
+      if (!destino.ok) {
+        logger.error({ leadId: lead.id, code: 'invalid_recipient_phone' }, 'WhatsApp AI reply blocked: no valid canonical phone for lead');
+      } else if (accessToken) {
         try {
-          await sendWhatsAppMessage(integration.external_id, accessToken, telefoneNormalizado, resultado.resposta);
+          await sendWhatsAppMessage(integration.external_id, accessToken, destino.phone, resultado.resposta);
           await supabase.from('conversations').insert({
             lead_id: lead.id,
             canal: 'whatsapp',

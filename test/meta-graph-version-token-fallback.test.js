@@ -138,7 +138,7 @@ describe('campaignSendHandler — worker usa external_id + META_SYSTEM_USER_TOKE
   it('envia normalmente quando a integração NÃO tem token próprio, só o do sistema', async () => {
     db = makeDb({
       campanhas: [{ id: 'camp-1', doctor_id: DOC, organization_id: 'org-1', mensagem: 'oi', status: 'processando' }],
-      leads: [{ id: 'lead-1', telefone: '551199' }],
+      leads: [{ id: 'lead-1', doctor_id: DOC, telefone: '551199', telefone_normalizado: '5511987654321', whatsapp_authorization_status: 'autorizado' }],
       conversations: [{ lead_id: 'lead-1', direcao: 'recebida', timestamp_msg: new Date().toISOString() }],
       campanha_envios: [{ campanha_id: 'camp-1', lead_id: 'lead-1', status: 'enviando' }],
       integrations: [integrationRow({ id: 'i2', external_id: 'pn-only-system' })],
@@ -161,7 +161,7 @@ describe('campaignSendHandler — worker usa external_id + META_SYSTEM_USER_TOKE
     });
 
     expect(ok).toBe(true);
-    expect(send).toHaveBeenCalledWith('pn-only-system', 'system-fallback-token', '551199', 'oi');
+    expect(send).toHaveBeenCalledWith('pn-only-system', 'system-fallback-token', '5511987654321', 'oi');
     expect(quota.reserve).toHaveBeenCalledTimes(1);
     expect(quota.settle).toHaveBeenCalledTimes(1);
   });
@@ -169,7 +169,7 @@ describe('campaignSendHandler — worker usa external_id + META_SYSTEM_USER_TOKE
   it('sem token individual e sem META_SYSTEM_USER_TOKEN -> missing_resource, nunca chama send', async () => {
     db = makeDb({
       campanhas: [{ id: 'camp-3', doctor_id: DOC, organization_id: 'org-1', mensagem: 'oi', status: 'processando' }],
-      leads: [{ id: 'lead-3', telefone: '551199' }],
+      leads: [{ id: 'lead-3', doctor_id: DOC, telefone: '551199', telefone_normalizado: '5511987654321', whatsapp_authorization_status: 'autorizado' }],
       conversations: [{ lead_id: 'lead-3', direcao: 'recebida', timestamp_msg: new Date().toISOString() }],
       campanha_envios: [{ campanha_id: 'camp-3', lead_id: 'lead-3', status: 'enviando' }],
       integrations: [integrationRow({ id: 'i4', external_id: 'pn-4' })],
@@ -197,7 +197,7 @@ describe('campaignSendHandler — worker usa external_id + META_SYSTEM_USER_TOKE
   it('nenhum token aparece em erro/log quando o envio falha', async () => {
     db = makeDb({
       campanhas: [{ id: 'camp-2', doctor_id: DOC, organization_id: 'org-1', mensagem: 'oi', status: 'processando' }],
-      leads: [{ id: 'lead-2', telefone: '551199' }],
+      leads: [{ id: 'lead-2', doctor_id: DOC, telefone: '551199', telefone_normalizado: '5511987654321', whatsapp_authorization_status: 'autorizado' }],
       conversations: [{ lead_id: 'lead-2', direcao: 'recebida', timestamp_msg: new Date().toISOString() }],
       campanha_envios: [{ campanha_id: 'camp-2', lead_id: 'lead-2', status: 'enviando' }],
       integrations: [integrationRow({ id: 'i3', external_id: 'pn-3', access_token: 'super-secret-individual-token' })],

@@ -30,8 +30,8 @@ function seed(campanhaExtra = {}) {
     integrations: [{ doctor_id: DOC, gateway: 'whatsapp', external_id: 'pn', access_token: 'tok' }],
     campanhas: [{ id: CAMP, doctor_id: DOC, organization_id: ORG, status: 'rascunho', mensagem: 'oi', filtro_status: null, ...campanhaExtra }],
     leads: [
-      { id: 'L1', doctor_id: DOC, telefone: '551101', status_atual: 'lead' },
-      { id: 'L2', doctor_id: DOC, telefone: '551102', status_atual: 'lead' },
+      { id: 'L1', doctor_id: DOC, telefone: '5511987654321', telefone_normalizado: '5511987654321', whatsapp_authorization_status: 'autorizado', status_atual: 'lead' },
+      { id: 'L2', doctor_id: DOC, telefone: '5511987654322', telefone_normalizado: '5511987654322', whatsapp_authorization_status: 'autorizado', status_atual: 'lead' },
     ],
     conversations: [
       { lead_id: 'L1', direcao: 'recebida', timestamp_msg: new Date().toISOString() },
@@ -270,7 +270,7 @@ describe('handlers de campanha (isolados)', async () => {
   it('dispatch: 1 par (envio+job) por destinatário via RPC atômica; L2 terminal não gera par novo; enfileira finalize; completa; re-run é no-op (cenário 5)', async () => {
     const client = makeDb({
       campanhas: [{ id: CAMP, doctor_id: DOC, organization_id: ORG, mensagem: 'oi' }],
-      leads: [{ id: 'L1', doctor_id: DOC }, { id: 'L2', doctor_id: DOC }, { id: 'L3', doctor_id: DOC }],
+      leads: [{ id: 'L1', doctor_id: DOC, whatsapp_authorization_status: 'autorizado' }, { id: 'L2', doctor_id: DOC, whatsapp_authorization_status: 'autorizado' }, { id: 'L3', doctor_id: DOC, whatsapp_authorization_status: 'autorizado' }],
       campanha_envios: [{ campanha_id: CAMP, lead_id: 'L2', status: 'enviado' }],
     }).client;
     const q = fakeQueue(client);
@@ -287,7 +287,7 @@ describe('handlers de campanha (isolados)', async () => {
   it('dispatch: crash no meio -> retry; re-run retoma sem perder nem duplicar (cenário 3)', async () => {
     const client = makeDb({
       campanhas: [{ id: CAMP, doctor_id: DOC, organization_id: ORG, mensagem: 'oi' }],
-      leads: [{ id: 'L1', doctor_id: DOC }, { id: 'L2', doctor_id: DOC }, { id: 'L3', doctor_id: DOC }, { id: 'L4', doctor_id: DOC }],
+      leads: ['L1', 'L2', 'L3', 'L4'].map((id) => ({ id, doctor_id: DOC, whatsapp_authorization_status: 'autorizado' })),
       campanha_envios: [],
     }).client;
     const q = fakeQueue(client);
@@ -311,7 +311,7 @@ describe('handlers de campanha (isolados)', async () => {
   it('dispatch: campanha SEM destinatários -> enfileira finalize; finalize fecha a campanha vazia', async () => {
     const client = makeDb({
       campanhas: [{ id: CAMP, doctor_id: DOC, organization_id: ORG, mensagem: 'oi', filtro_status: 'inexistente' }],
-      leads: [{ id: 'L1', doctor_id: DOC, status_atual: 'lead' }],
+      leads: [{ id: 'L1', doctor_id: DOC, status_atual: 'lead', whatsapp_authorization_status: 'autorizado' }],
       campanha_envios: [], job_queue: [],
     }).client;
     const q = fakeQueue(client);
@@ -358,7 +358,13 @@ describe('handlers de campanha (isolados)', async () => {
     const calls = { reserve: [], settle: [], release: [], complete: [], retry: [], send: [] };
     const client = makeDb({
       campanhas: [{ id: CAMP, doctor_id: DOC, organization_id: ORG, mensagem: 'oi', status: over.campaignStatus || 'processando' }],
-      leads: over.noLead ? [] : [{ id: 'L1', telefone: '551101' }],
+      leads: over.noLead ? [] : [{
+        id: 'L1', doctor_id: DOC,
+        telefone: over.telefoneRaw ?? '5511987654321',
+        telefone_normalizado: 'telefoneNormalizado' in over ? over.telefoneNormalizado : '5511987654321',
+        whatsapp_authorization_status: over.authorizationStatus || 'autorizado',
+        dados_extraidos: over.dadosExtraidos ?? null,
+      }],
       conversations: [{ lead_id: 'L1', direcao: 'recebida', timestamp_msg: new Date(over.inboundAgo ?? 0 ? Date.now() - over.inboundAgo : Date.now()).toISOString() }],
       campanha_envios: [{ campanha_id: CAMP, lead_id: 'L1', status: 'enviando' }],
     }).client;
@@ -370,7 +376,13 @@ describe('handlers de campanha (isolados)', async () => {
         retry: async (a) => { calls.retry.push(a); return over.retryResult ?? { status: 'retry' }; },
       },
       quota: {
-        reserve: async (a) => { calls.reserve.push(a); return over.reserve ?? { allowed: true, reservationId: 'rv-1' }; },
+        reserve: async (a) => {
+          calls.reserve.push(a);
+          if (over.statusAfterReserve) {
+            await client.from('leads').update({ whatsapp_authorization_status: over.statusAfterReserve }).eq('id', 'L1');
+          }
+          return over.reserve ?? { allowed: true, reservationId: 'rv-1' };
+        },
         settle: async (a) => { calls.settle.push(a); },
         release: async (a) => { calls.release.push(a); },
       },
@@ -422,5 +434,47 @@ describe('handlers de campanha (isolados)', async () => {
     expect(await h.handleCampaignSendJob(sendJob(), { workerId: 'w', ...f })).toBe(true);
     expect(f.calls.reserve).toHaveLength(0); expect(f.calls.send).toHaveLength(0);
     expect((await f.client.from('campanha_envios').select('*').eq('lead_id', 'L1').maybeSingle()).data.status).toBe('pendente_template');
+  });
+  it.each([
+    ['pendente', 'sem_autorizacao'], ['recusado', 'sem_autorizacao'], ['opt_out', 'opt_out'],
+  ])('send bloqueia consentimento %s', async (authorizationStatus, expected) => {
+    const f = sendFakes({ authorizationStatus });
+    expect(await h.handleCampaignSendJob(sendJob(), { workerId: 'w', ...f })).toBe(true);
+    expect(f.calls.send).toHaveLength(0);
+    expect((await f.client.from('campanha_envios').select('*').eq('lead_id', 'L1').single()).data.status).toBe(expected);
+  });
+  it('send usa o telefone canônico E.164 (telefone_normalizado), nunca o campo bruto', async () => {
+    const f = sendFakes({ telefoneRaw: 'lixo-nao-deveria-ser-usado', telefoneNormalizado: '5511987654321' });
+    expect(await h.handleCampaignSendJob(sendJob(), { workerId: 'w', ...f })).toBe(true);
+    expect(f.calls.send).toHaveLength(1);
+    expect(f.calls.send[0][2]).toBe('5511987654321');
+  });
+  it('sem telefone_normalizado: cai para normalizar leads.telefone (formato legado sem o nono dígito) de forma determinística', async () => {
+    const f = sendFakes({ telefoneNormalizado: null, telefoneRaw: '554396216864' }); // 12 dígitos, sem o 9
+    expect(await h.handleCampaignSendJob(sendJob(), { workerId: 'w', ...f })).toBe(true);
+    expect(f.calls.send).toHaveLength(1);
+    expect(f.calls.send[0][2]).toBe('5543996216864'); // canônico com o 9 inserido
+  });
+  it('telefone inválido/ambíguo (sem telefone_normalizado e telefone bruto não determinístico) bloqueia ANTES da Meta com invalid_recipient_phone', async () => {
+    const f = sendFakes({ telefoneNormalizado: null, telefoneRaw: 'nao-e-um-telefone' });
+    expect(await h.handleCampaignSendJob(sendJob(), { workerId: 'w', ...f })).toBe(true);
+    expect(f.calls.send).toHaveLength(0); // Meta NUNCA é chamada
+    expect((await f.client.from('campanha_envios').select('*').eq('lead_id', 'L1').single()).data.status).toBe('invalid_recipient_phone');
+  });
+  it('lead em quarentena de identidade (phone_identity_review_required) bloqueia ANTES da Meta, mesmo com telefone_normalizado presente', async () => {
+    const f = sendFakes({
+      telefoneNormalizado: '5511987654321', // canônico até existiria, mas a quarentena bloqueia mesmo assim
+      dadosExtraidos: { phone_identity_review_required: true, phone_identity_reason: 'ambiguous_candidates' },
+    });
+    expect(await h.handleCampaignSendJob(sendJob(), { workerId: 'w', ...f })).toBe(true);
+    expect(f.calls.send).toHaveLength(0);
+    expect((await f.client.from('campanha_envios').select('*').eq('lead_id', 'L1').single()).data.status).toBe('phone_identity_review_required');
+  });
+  it('re-check imediatamente antes do send bloqueia opt-out ocorrido no meio do job', async () => {
+    const f = sendFakes({ statusAfterReserve: 'opt_out' });
+    expect(await h.handleCampaignSendJob(sendJob(), { workerId: 'w', ...f })).toBe(true);
+    expect(f.calls.send).toHaveLength(0);
+    expect(f.calls.release).toHaveLength(1);
+    expect((await f.client.from('campanha_envios').select('*').eq('lead_id', 'L1').single()).data.status).toBe('opt_out');
   });
 });

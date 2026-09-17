@@ -5,6 +5,7 @@ import { sendWhatsAppMessage } from '../lib/whatsapp.js';
 import { authorizeResource } from '../lib/authz.js';
 import { CredentialVault } from '../lib/credentialVault.js';
 import { attachTenantContext, scopedDoctorIds } from '../lib/tenantContext.js';
+import { resolveCanonicalSendPhone, isPhoneIdentityReviewRequired } from '../lib/phoneNormalization.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -109,12 +110,19 @@ router.post('/send', async (req, res) => {
     table: 'leads',
     id: lead_id,
     requireOwnerForCloser: true,
-    select: 'id, telefone, doctor_id, organization_id, sdr_responsavel_id',
+    select: 'id, telefone, telefone_normalizado, dados_extraidos, doctor_id, organization_id, sdr_responsavel_id',
   });
   if (!authorization.ok) {
     return res.status(authorization.reason === 'not_found' ? 404 : 403).json({ error: authorization.reason });
   }
   const lead = authorization.row;
+
+  // Lead em quarentena de identidade (telefone ambíguo, webhook não pôde
+  // decidir sozinho) nunca envia até revisão humana — nem manual, nem IA,
+  // nem campanha.
+  if (isPhoneIdentityReviewRequired(lead)) {
+    return res.status(409).json({ error: 'phone_identity_review_required' });
+  }
 
   // FASE 2.3: com tenant core ligado, o lead precisa pertencer à organização
   // ativa — bloqueia ANTES de enviar a mensagem (o trigger do banco é a última
@@ -168,8 +176,15 @@ router.post('/send', async (req, res) => {
     });
   }
 
+  // Nunca enviamos telefone cru para a Meta: só o canônico E.164, resolvido
+  // de forma determinística. Ambíguo/inválido bloqueia ANTES da chamada.
+  const destino = resolveCanonicalSendPhone(lead);
+  if (!destino.ok) {
+    return res.status(400).json({ error: 'invalid_recipient_phone' });
+  }
+
   try {
-    await sendWhatsAppMessage(credentials.externalId, accessToken, lead.telefone, texto.trim());
+    await sendWhatsAppMessage(credentials.externalId, accessToken, destino.phone, texto.trim());
   } catch (err) {
     req.log?.error({ err }, 'WhatsApp send failed');
     return res.status(502).json({ error: 'whatsapp_send_failed', requestId: req.id });
