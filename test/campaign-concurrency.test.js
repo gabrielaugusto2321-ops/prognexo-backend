@@ -29,8 +29,8 @@ beforeEach(() => {
     integrations: [{ doctor_id: DOC, gateway: 'whatsapp', external_id: 'pn', access_token: 'tok' }],
     campanhas: [{ id: CAMP, doctor_id: DOC, status: 'rascunho', mensagem: 'oi', filtro_status: null }],
     leads: [
-      { id: 'L1', doctor_id: DOC, telefone: '551101', status_atual: 'lead' },
-      { id: 'L2', doctor_id: DOC, telefone: '551102', status_atual: 'lead' },
+      { id: 'L1', doctor_id: DOC, telefone_normalizado: '5511987654321', whatsapp_authorization_status: 'autorizado', status_atual: 'lead' },
+      { id: 'L2', doctor_id: DOC, telefone_normalizado: '5511987654322', whatsapp_authorization_status: 'autorizado', status_atual: 'lead' },
     ],
     conversations: [
       { lead_id: 'L1', direcao: 'recebida', timestamp_msg: new Date().toISOString() },

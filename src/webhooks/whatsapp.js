@@ -13,6 +13,12 @@ import { logger } from '../lib/logger.js';
 
 const router = Router();
 
+const OPT_OUT_WORDS = new Set(['PARAR', 'SAIR', 'STOP', 'CANCELAR']);
+export function isWhatsAppOptOut(text) {
+  const normalized = String(text ?? '').trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+  return OPT_OUT_WORDS.has(normalized);
+}
+
 // GET /webhooks/whatsapp — verificação exigida pela Meta ao registrar o webhook
 router.get('/', (req, res) => {
   const mode = req.query['hub.mode'];
@@ -109,8 +115,14 @@ router.post('/', async (req, res) => {
         .from('leads')
         .select('id, status_atual, atendido_por, ia_mensagens_enviadas, ia_sem_resposta_count')
         .eq('doctor_id', integration.doctor_id)
-        .eq('telefone', telefoneNormalizado)
+        .eq('telefone_normalizado', telefoneNormalizado)
         .maybeSingle();
+      if (!lead) {
+        const fallback = await supabase.from('leads')
+          .select('id, status_atual, atendido_por, ia_mensagens_enviadas, ia_sem_resposta_count')
+          .eq('doctor_id', integration.doctor_id).eq('telefone', telefoneNormalizado).maybeSingle();
+        lead = fallback.data;
+      }
 
       // Número novo, ainda sem lead cadastrado — cria automaticamente em vez
       // de descartar a mensagem, pra nenhuma conversa recebida se perder.
@@ -122,6 +134,7 @@ router.post('/', async (req, res) => {
             // tenant herdado da integração (resolução confiável do servidor)
             ...(integration.organization_id ? { organization_id: integration.organization_id } : {}),
             telefone: telefoneNormalizado,
+            telefone_normalizado: telefoneNormalizado,
             nome: contactsPorTelefone[msg.from] || telefoneNormalizado,
             status_atual: 'lead',
             journey_type: 'low_ticket',
@@ -144,15 +157,40 @@ router.post('/', async (req, res) => {
         timestamp_msg: new Date(Number(msg.timestamp) * 1000).toISOString(),
       });
 
+      if (msg.type === 'text' && isWhatsAppOptOut(msg.text?.body)) {
+        await supabase.from('leads').update({
+          whatsapp_authorization_status: 'opt_out',
+          whatsapp_authorization_at: new Date().toISOString(),
+          whatsapp_authorization_source: 'whatsapp_message',
+        }).eq('id', lead.id);
+        continue;
+      }
+
       if (lead.status_atual === 'lead') {
         await supabase.from('leads').update({ status_atual: 'conversa_iniciada' }).eq('id', lead.id);
         await supabase.from('deals').update({ etapa: 'conversa_iniciada' }).eq('lead_id', lead.id);
       }
 
       // ---- Atendimento por IA ----
-      // Só entra em ação se o médico tiver ativado, e se a conversa ainda
-      // não tiver sido assumida por um closer humano (atendido_por='humano').
-      const iaDeveResponder = doctor?.ia_atendimento_ativo && lead.atendido_por !== 'humano';
+      // Recarrega o status de autorização mais recente antes de decidir —
+      // pode ter mudado (opt-out) entre a resolução do lead e este ponto, ou
+      // numa mensagem anterior deste mesmo lote (correção 2 da FASE 1: o
+      // bloqueio de IA precisa ser durável para o lead, não só para a
+      // mensagem de opt-out em si). A conversa recebida já foi gravada acima
+      // — continua visível para atendimento humano mesmo quando a IA é
+      // bloqueada aqui; só a resposta AUTOMÁTICA é interrompida.
+      const { data: leadAtual } = await supabase
+        .from('leads')
+        .select('whatsapp_authorization_status')
+        .eq('id', lead.id)
+        .maybeSingle();
+      const statusAutorizacao = leadAtual?.whatsapp_authorization_status ?? 'pendente';
+      const bloqueadoPorConsentimento = statusAutorizacao === 'opt_out' || statusAutorizacao === 'recusado';
+
+      // Só entra em ação se o médico tiver ativado, a conversa ainda não
+      // tiver sido assumida por um closer humano (atendido_por='humano'), e o
+      // lead não estiver com consentimento recusado/opt_out.
+      const iaDeveResponder = !bloqueadoPorConsentimento && doctor?.ia_atendimento_ativo && lead.atendido_por !== 'humano';
       if (!iaDeveResponder) continue;
 
       const { data: historico } = await supabase

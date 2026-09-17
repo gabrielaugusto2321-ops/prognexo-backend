@@ -16,6 +16,25 @@ export function makeDb(initial = {}) {
     users: {}, // token -> { id, email, email_confirmed_at }
   };
 
+  // Injeção de falha controlada — simula uma queda de banco no meio de um
+  // laço de escrita (ex.: import de CSV) sem precisar de um mock manual por
+  // teste. `failNextWrite('leads', 'insert')` faz a PRÓXIMA operação desse
+  // tipo nessa tabela devolver um erro, uma única vez.
+  const pendingFailures = [];
+  // `skip`: quantas chamadas boas deixar passar antes de começar a falhar —
+  // permite simular uma quebra no MEIO de um laço (ex.: linha 1 de um CSV
+  // grava com sucesso, linha 2 quebra), não só na primeira operação.
+  function failNextWrite(tableName, opName = 'insert', times = 1, skip = 0) {
+    pendingFailures.push({ table: tableName, op: opName, remaining: times, skip });
+  }
+  function consumeFailure(tableName, opName) {
+    const entry = pendingFailures.find((f) => f.table === tableName && f.op === opName && (f.remaining > 0 || f.skip > 0));
+    if (!entry) return false;
+    if (entry.skip > 0) { entry.skip -= 1; return false; }
+    entry.remaining -= 1;
+    return true;
+  }
+
   function table(name) {
     if (!tables[name]) tables[name] = [];
     return tables[name];
@@ -83,10 +102,24 @@ export function makeDb(initial = {}) {
 
     function resolve(single) {
       const rows = table(name);
+      if ((op === 'insert' || op === 'update' || op === 'upsert') && consumeFailure(name, op)) {
+        return Promise.resolve({ data: null, error: { code: 'db_down', message: 'simulated failure (failNextWrite)' } });
+      }
       if (op === 'insert' || op === 'upsert') {
         const items = Array.isArray(payload) ? payload : [payload];
         const inserted = [];
         const CONFLICT_KEYS = ['provider', 'external_event_id', 'campanha_id', 'lead_id', 'gateway', 'gateway_transaction_id', 'doctor_id', 'user_id'];
+        // `lead_imports` tem unique(doctor_id, file_hash) — simulado aqui (só
+        // pro INSERT puro, não-upsert) pra testar a corrida de duas requisições
+        // de commit idênticas concorrentes (FASE 1, correção 5).
+        if (op === 'insert' && name === 'lead_imports') {
+          for (const item of items) {
+            const dup = rows.find((r) => r.doctor_id === item.doctor_id && r.file_hash === item.file_hash);
+            if (dup) {
+              return Promise.resolve({ data: null, error: { code: '23505', message: 'duplicate key value violates unique constraint "lead_imports_doctor_id_file_hash_key"' } });
+            }
+          }
+        }
         for (const item of items) {
           const row = { id: item.id || `mock-${name}-${rows.length + 1}`, ...item };
           if (op === 'upsert') {
@@ -316,5 +349,6 @@ export function makeDb(initial = {}) {
     client,
     tables,
     setAuthUser(token, user) { authState.users[token] = user; },
+    failNextWrite,
   };
 }
