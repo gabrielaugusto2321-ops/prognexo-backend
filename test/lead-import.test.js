@@ -218,6 +218,48 @@ describe('lead import endpoints', () => {
     const leadCount = db.tables.leads.length;
     const second = await request(app).post(url).set(auth('a')).set('Content-Type', 'text/csv').set(declarado).send(body);
     expect(second.status).toBe(200); expect(second.body.ja_processado).toBe(true); expect(db.tables.leads).toHaveLength(leadCount); expect(db.tables.lead_imports).toHaveLength(1);
+    expect(db.tables.deals).toHaveLength(2);
+  });
+
+  it('cria um cartão por contato importado, na etapa lead, sem autorizar mensagens', async () => {
+    const body = csv('Alfa;11987654321;;;nao;', 'Beta;11988888888;;;nao;', 'Gama;11977777777;;;nao;');
+    const res = await request(app).post(`/leads/import/commit?doctor_id=${doctorA}&nome_lista=Teste&filename=teste.csv`)
+      .set(auth('a')).set('Content-Type', 'text/csv').send(body);
+    expect(res.status).toBe(200);
+    expect(db.tables.deals).toHaveLength(3);
+    expect(new Set(db.tables.deals.map((d) => d.lead_id)).size).toBe(3);
+    expect(db.tables.deals.every((d) => d.etapa === 'lead')).toBe(true);
+    expect(db.tables.leads.every((l) => l.whatsapp_authorization_status === 'pendente')).toBe(true);
+  });
+
+  it('reenvio do mesmo CSV repara os cartões de um lote antigo concluído sem duplicar leads ou deals', async () => {
+    const body = csv('Alfa;11987654321;;;nao;', 'Beta;11988888888;;;nao;', 'Gama;11977777777;;;nao;');
+    const url = `/leads/import/commit?doctor_id=${doctorA}&nome_lista=Teste&filename=teste.csv`;
+    const first = await request(app).post(url).set(auth('a')).set('Content-Type', 'text/csv').send(body);
+    expect(first.status).toBe(200);
+    db.tables.deals.splice(0, 3); // simula o lote criado antes desta correção
+    const second = await request(app).post(url).set(auth('a')).set('Content-Type', 'text/csv').send(body);
+    expect(second.status).toBe(200);
+    expect(second.body.ja_processado).toBe(true);
+    expect(db.tables.leads).toHaveLength(3);
+    expect(db.tables.deals).toHaveLength(3);
+    const third = await request(app).post(url).set(auth('a')).set('Content-Type', 'text/csv').send(body);
+    expect(third.status).toBe(200);
+    expect(db.tables.deals).toHaveLength(3);
+  });
+
+  it('mantém a etapa atual e o responsável ao reparar apenas um cartão ausente', async () => {
+    const body = csv('Alfa;11987654321;;;nao;', 'Beta;11988888888;;;nao;');
+    const url = `/leads/import/commit?doctor_id=${doctorA}&nome_lista=Teste&filename=teste.csv`;
+    expect((await request(app).post(url).set(auth('a')).set('Content-Type', 'text/csv').send(body)).status).toBe(200);
+    const lead = db.tables.leads[0];
+    lead.status_atual = 'reuniao_marcada';
+    lead.sdr_responsavel_id = closer;
+    db.tables.deals.splice(0, 1);
+    const replay = await request(app).post(url).set(auth('a')).set('Content-Type', 'text/csv').send(body);
+    expect(replay.status).toBe(200);
+    expect(db.tables.deals).toHaveLength(2);
+    expect(db.tables.deals.find((d) => d.lead_id === lead.id)).toMatchObject({ etapa: 'reuniao_marcada', sdr_responsavel_id: closer });
   });
 
   describe('correção 4 — retry de falha parcial', () => {
@@ -239,6 +281,20 @@ describe('lead import endpoints', () => {
       expect(retomada.body.criados).toBe(2);
       expect(db.tables.leads).toHaveLength(2); // linha 1 NÃO foi duplicada
       expect(db.tables.lead_import_rows.filter((r) => r.import_id === lote.id)).toHaveLength(2);
+      expect(db.tables.deals).toHaveLength(2);
+    });
+
+    it('falha ao criar cartão e retoma sem repetir o lead ou criar dois cartões', async () => {
+      db.failNextWrite('deals', 'insert');
+      const failed = await request(app).post(url).set(auth('a')).set('Content-Type', 'text/csv').send(body);
+      expect(failed.status).toBeGreaterThanOrEqual(500);
+      expect(db.tables.leads).toHaveLength(1);
+      expect(db.tables.deals).toHaveLength(0);
+      expect(db.tables.lead_import_rows).toHaveLength(0);
+      const resumed = await request(app).post(url).set(auth('a')).set('Content-Type', 'text/csv').send(body);
+      expect(resumed.status).toBe(200);
+      expect(db.tables.leads).toHaveLength(2);
+      expect(db.tables.deals).toHaveLength(2);
     });
 
     it('lote processando recente -> 409 import_in_progress (sem reprocessar)', async () => {

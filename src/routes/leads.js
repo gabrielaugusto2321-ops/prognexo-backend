@@ -224,12 +224,45 @@ function isStaleProcessing(importRow) {
 // prosseguir e RETOMAR o processamento (lote 'falhou', ou 'processando' órfão).
 function decideForExistingImport(importRow) {
   if (importRow.status === 'concluido') {
-    return (res) => res.json({ ...importRow, import_id: importRow.id, ja_processado: true });
+    return async (res, doctorId) => {
+      // Lotes anteriores ao reparo já têm leads, mas podem não ter cartões.
+      await reconcileImportDeals(importRow.id, doctorId);
+      return res.json({ ...importRow, import_id: importRow.id, ja_processado: true });
+    };
   }
   if (importRow.status === 'processando' && !isStaleProcessing(importRow)) {
     return (res) => res.status(409).json({ error: 'import_in_progress', import_id: importRow.id });
   }
   return null;
+}
+
+const PIPELINE_STAGES = new Set(['lead', 'conversa_iniciada', 'reuniao_marcada', 'proposta', 'fechado', 'perdido']);
+
+async function ensurePipelineDeal(lead) {
+  const { data: existing, error: lookupError } = await supabase.from('deals').select('id')
+    .eq('lead_id', lead.id).limit(1).maybeSingle();
+  if (lookupError) throw lookupError;
+  if (existing) return;
+
+  const { error } = await supabase.from('deals').insert({
+    lead_id: lead.id,
+    etapa: PIPELINE_STAGES.has(lead.status_atual) ? lead.status_atual : 'lead',
+    sdr_responsavel_id: lead.sdr_responsavel_id || null,
+  });
+  if (error) throw error;
+}
+
+async function reconcileImportDeals(importId, doctorId) {
+  const { data: rows, error } = await supabase.from('lead_import_rows').select('lead_id')
+    .eq('import_id', importId).in('status', ['criado', 'atualizado']);
+  if (error) throw error;
+  for (const leadId of new Set((rows || []).map((row) => row.lead_id).filter(Boolean))) {
+    const { data: lead, error: leadError } = await supabase.from('leads').select('id, status_atual, sdr_responsavel_id')
+      .eq('id', leadId).eq('doctor_id', doctorId).maybeSingle();
+    if (leadError) throw leadError;
+    if (!lead) throw new Error('import_lead_not_found');
+    await ensurePipelineDeal(lead);
+  }
 }
 
 router.post('/import/commit', parseCsvBody, async (req, res, next) => {
@@ -267,7 +300,7 @@ router.post('/import/commit', parseCsvBody, async (req, res, next) => {
 
     if (existing) {
       const decision = decideForExistingImport(existing);
-      if (decision) return decision(res);
+      if (decision) return await decision(res, doctorId);
       importRow = existing;
       resuming = true;
     } else {
@@ -292,7 +325,7 @@ router.post('/import/commit', parseCsvBody, async (req, res, next) => {
           if (racedErr) throw racedErr;
           if (!raced) throw insertErr;
           const decision = decideForExistingImport(raced);
-          if (decision) return decision(res);
+          if (decision) return await decision(res, doctorId);
           importRow = raced;
           resuming = true;
         } else {
@@ -341,6 +374,7 @@ router.post('/import/commit', parseCsvBody, async (req, res, next) => {
           continue;
         }
         let leadId;
+        let pipelineLead;
         if (row.status === 'valido') {
           const { data: lead, error } = await supabase.from('leads').insert({
             doctor_id: doctorId, ...(organizationId ? { organization_id: organizationId } : {}),
@@ -354,10 +388,12 @@ router.post('/import/commit', parseCsvBody, async (req, res, next) => {
           }).select().single();
           if (error) throw error;
           leadId = lead.id;
+          pipelineLead = lead;
         } else {
           const { data: existingLead, error: loadError } = await supabase.from('leads').select('*').eq('id', row.existing_lead_id).single();
           if (loadError) throw loadError;
           leadId = existingLead.id;
+          pipelineLead = existingLead;
           const patch = {};
           if (row.origem) patch.origem_lead = row.origem;
           if (row.indicado_por) patch.indicado_por = row.indicado_por;
@@ -370,6 +406,7 @@ router.post('/import/commit', parseCsvBody, async (req, res, next) => {
             if (error) throw error;
           }
         }
+        await ensurePipelineDeal(pipelineLead);
         const { error: rowError } = await supabase.from('lead_import_rows').insert({
           import_id: importRow.id, row_number: row.row_number, lead_id: leadId,
           status: row.status === 'valido' ? 'criado' : 'atualizado', phone_hash: phoneHash,
