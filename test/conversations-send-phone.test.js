@@ -8,7 +8,7 @@ process.env.CORS_ALLOWED_ORIGINS = 'https://app.test';
 let db;
 const sendWhatsAppMessage = vi.fn(async () => ({}));
 vi.mock('../src/lib/supabase.js', () => ({ get supabase() { return db.client; } }));
-vi.mock('../src/lib/whatsapp.js', () => ({ sendWhatsAppMessage }));
+vi.mock('../src/lib/whatsapp.js', () => ({ sendWhatsAppMessage, sendWhatsAppTemplate: vi.fn(async () => ({ messageId: 'wamid.mock' })) }));
 
 const { app } = await import('../src/server.js');
 

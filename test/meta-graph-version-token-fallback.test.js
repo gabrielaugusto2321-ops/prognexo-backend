@@ -5,6 +5,7 @@ import { makeDb } from './helpers/mockSupabase.js';
 // Chaves FALSAS geradas no teste — nunca chaves reais.
 const KEYRING = JSON.stringify({ v1: crypto.randomBytes(32).toString('base64') });
 process.env.NODE_ENV = 'test';
+process.env.WHATSAPP_SEND_INTERVAL_MS = '0'; // FASE 2 - desliga pacing artificial nos testes
 process.env.TOKEN_ENCRYPTION_ENABLED = 'true';
 process.env.TOKEN_ENCRYPTION_DUAL_WRITE = 'false';
 process.env.TOKEN_ENCRYPTION_ALLOW_PLAINTEXT_READ = 'true'; // janela de migração

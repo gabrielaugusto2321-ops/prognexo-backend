@@ -9,13 +9,14 @@ import { makeDb } from './helpers/mockSupabase.js';
 // exercida de verdade (mesmo código de resolveTenantContext/scopedDoctorIds).
 
 process.env.NODE_ENV = 'test';
+process.env.WHATSAPP_SEND_INTERVAL_MS = '0'; // FASE 2 - desliga pacing artificial nos testes
 process.env.CORS_ALLOWED_ORIGINS = 'https://app.test';
 
 let db;
 const sendWhatsApp = vi.fn(async () => ({}));
 const sendEmailFake = vi.fn(async () => ({ id: 'fake' }));
 vi.mock('../src/lib/supabase.js', () => ({ get supabase() { return db.client; } }));
-vi.mock('../src/lib/whatsapp.js', () => ({ sendWhatsAppMessage: sendWhatsApp }));
+vi.mock('../src/lib/whatsapp.js', () => ({ sendWhatsAppMessage: sendWhatsApp, sendWhatsAppTemplate: vi.fn(async () => ({ messageId: 'wamid.mock' })) }));
 vi.mock('../src/lib/distribuicao.js', () => ({ escolherCloserAutomatico: vi.fn(async () => null) }));
 vi.mock('../src/lib/iaAgent.js', () => ({ processarMensagemComIA: vi.fn(async () => ({ resposta: 'x', score: 1 })) }));
 vi.mock('../src/lib/knowledgeChunks.js', () => ({ buscarChunksRelevantes: vi.fn(async () => []) }));

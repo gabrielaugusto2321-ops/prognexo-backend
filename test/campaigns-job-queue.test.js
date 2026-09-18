@@ -3,6 +3,7 @@ import request from 'supertest';
 import { makeDb } from './helpers/mockSupabase.js';
 
 process.env.NODE_ENV = 'test';
+process.env.WHATSAPP_SEND_INTERVAL_MS = '0'; // FASE 2 - desliga pacing artificial nos testes
 process.env.CORS_ALLOWED_ORIGINS = 'https://app.test';
 const key = Buffer.alloc(32, 9).toString('base64');
 process.env.TOKEN_ENCRYPTION_KEYRING = JSON.stringify({ v1: key });
@@ -12,7 +13,7 @@ process.env.JOB_RUNNER_SECRET = 'runner-secret-0123456789';
 let db;
 const sendWhatsAppMessage = vi.fn(async () => ({}));
 vi.mock('../src/lib/supabase.js', () => ({ get supabase() { return db.client; } }));
-vi.mock('../src/lib/whatsapp.js', () => ({ sendWhatsAppMessage }));
+vi.mock('../src/lib/whatsapp.js', () => ({ sendWhatsAppMessage, sendWhatsAppTemplate: vi.fn(async () => ({ messageId: 'wamid.mock' })) }));
 
 // Aquece a árvore de imports pesada (googleapis é frio e lento no Windows)
 // FORA do timeout de teste — senão o 1º `app()` estoura os 30s.
@@ -87,7 +88,7 @@ describe('FASE 2.8 — campanha via fila (dispatch persistente)', () => {
     const a = await app();
     const res = await request(a).post(`/campanhas/${CAMP}/enviar`).set({ Authorization: 'Bearer owner' });
     expect(res.status).toBe(202);
-    await new Promise((r) => setTimeout(r, 120));
+    await new Promise((r) => setTimeout(r, 600));
     expect(db.tables.job_queue.length).toBe(0);
     expect(sendWhatsAppMessage).toHaveBeenCalledTimes(2);
   });
@@ -97,7 +98,7 @@ describe('FASE 2.8 — campanha via fila (dispatch persistente)', () => {
     const a = await app();
     const res = await request(a).post(`/campanhas/${CAMP}/enviar`).set({ Authorization: 'Bearer owner' });
     expect(res.status).toBe(202);
-    await new Promise((r) => setTimeout(r, 120));
+    await new Promise((r) => setTimeout(r, 600));
     expect(db.tables.job_queue.length).toBe(0);
     expect(sendWhatsAppMessage).toHaveBeenCalledTimes(2);
   });
@@ -115,7 +116,7 @@ describe('FASE 2.8 — campanha via fila (dispatch persistente)', () => {
     expect(dispatch[0].id).toBe(res.body.job_id);
     // nenhum campaign.send_message foi criado dentro da request:
     expect(db.tables.job_queue.filter((j) => j.job_type === 'campaign.send_message')).toHaveLength(0);
-    await new Promise((r) => setTimeout(r, 80));
+    await new Promise((r) => setTimeout(r, 300));
     expect(sendWhatsAppMessage).not.toHaveBeenCalled();
   });
 

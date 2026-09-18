@@ -12,6 +12,7 @@ import { env } from '../config/env.js';
 import { logger } from '../lib/logger.js';
 import { normalizeBrazilianPhone, resolveCanonicalSendPhone, isPhoneIdentityReviewRequired } from '../lib/phoneNormalization.js';
 import { resolveQuarantineLead } from '../lib/phoneIdentityQuarantine.js';
+import { applyWhatsAppStatusEvent } from '../lib/whatsappStatusEvents.js';
 
 const LEAD_IDENTITY_SELECT = 'id, status_atual, atendido_por, ia_mensagens_enviadas, ia_sem_resposta_count, telefone, telefone_normalizado, whatsapp_wa_id, dados_extraidos';
 
@@ -68,7 +69,25 @@ router.post('/', async (req, res) => {
     const change = entry?.changes?.[0];
     const value = change?.value;
 
-    if (value?.statuses) return; // status de entrega/leitura — ignora por ora
+    // FASE 2 — status de entrega/leitura de campanhas por template (e,
+    // incidentalmente, de qualquer envio com message_id no ledger). Nunca
+    // lança: cada evento é processado de forma independente e best-effort.
+    if (Array.isArray(value?.statuses)) {
+      for (const statusEvent of value.statuses) {
+        try {
+          await applyWhatsAppStatusEvent({
+            supabase,
+            messageId: statusEvent?.id,
+            status: statusEvent?.status,
+            errorCode: statusEvent?.errors?.[0]?.code ?? null,
+            log: logger,
+          });
+        } catch (err) {
+          logger.error({ err: { code: 'status_event_failed' } }, 'WhatsApp status webhook: falha ao processar evento');
+        }
+      }
+      return;
+    }
 
     const phoneNumberId = value?.metadata?.phone_number_id;
     const messages = value?.messages;

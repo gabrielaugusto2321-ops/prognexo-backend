@@ -3,6 +3,7 @@ import request from 'supertest';
 import { makeDb } from './helpers/mockSupabase.js';
 
 process.env.NODE_ENV = 'test';
+process.env.WHATSAPP_SEND_INTERVAL_MS = '0'; // FASE 2 - desliga pacing artificial nos testes
 process.env.CORS_ALLOWED_ORIGINS = 'https://app.test';
 
 let db;
@@ -13,7 +14,7 @@ vi.mock('../src/lib/supabase.js', () => ({
     return db.client;
   },
 }));
-vi.mock('../src/lib/whatsapp.js', () => ({ sendWhatsAppMessage }));
+vi.mock('../src/lib/whatsapp.js', () => ({ sendWhatsAppMessage, sendWhatsAppTemplate: vi.fn(async () => ({ messageId: 'wamid.mock' })) }));
 
 const { app } = await import('../src/server.js');
 
@@ -42,7 +43,7 @@ beforeEach(() => {
 });
 
 describe('POST /campanhas/:id/enviar — RACE01 (comportamental)', () => {
-  const settle = () => new Promise((r) => setTimeout(r, 100)); // deixa o envio destacado terminar
+  const settle = () => new Promise((r) => setTimeout(r, 400)); // deixa o envio destacado terminar
 
   it('duas requisições simultâneas: só uma dispara, a outra recebe 409', async () => {
     const req1 = request(app).post(`/campanhas/${CAMP}/enviar`).set({ Authorization: 'Bearer owner' });

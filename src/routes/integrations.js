@@ -7,6 +7,8 @@ import { CredentialVault } from '../lib/credentialVault.js';
 import { attachTenantContext } from '../lib/tenantContext.js';
 import { webhookTokenRotateLimiter } from '../middleware/rateLimits.js';
 import { isWhatsappOperacional, gatewaysComWebhookRecebido } from '../lib/integrationStatus.js';
+import { syncWhatsAppTemplates } from '../lib/whatsappTemplateSync.js';
+import { isTemplateSelectable } from '../lib/whatsappTemplates.js';
 
 // Papéis que podem rotacionar o segredo de webhook de pagamento.
 const ROTATE_ROLES = new Set(['organization_owner', 'organization_admin']);
@@ -59,6 +61,13 @@ function respondDoctorIdGap(req, res) {
     return res.status(409).json({ error: 'tenant_backfill_required' });
   }
   return res.status(400).json({ error: 'doctor_id necessário' });
+}
+
+// FASE 2 — closer nunca sincroniza o catálogo de templates (ação de
+// configuração de integração, não de atendimento). Vale nos dois modos.
+function isCloserRole(req) {
+  if (req.tenant?.enabled) return req.tenant.role === 'closer';
+  return req.user?.role === 'closer';
 }
 
 // GET /integrations?doctor_id= (obrigatório se for admin)
@@ -291,6 +300,85 @@ router.post('/:id/webhook-token/rotate', webhookTokenRotateLimiter, async (req, 
     header: 'X-Prognexo-Webhook-Token',
     rotated_at: patch.webhook_token_rotated_at,
     warning: 'Guarde este token agora. Ele não poderá ser consultado novamente. O token anterior deixou de funcionar.',
+  });
+});
+
+// POST /integrations/whatsapp/templates/sync
+// FASE 2 — pagina TODOS os templates da WABA do médico (ver
+// src/lib/whatsappTemplateSync.js) e substitui o cache local numa única
+// transação (RPC). Nunca cria/edita/aprova template — só espelha o que já
+// existe no Business Manager da Meta. Closer nunca sincroniza.
+router.post('/whatsapp/templates/sync', async (req, res) => {
+  // Checa o papel closer ANTES de resolver doctor_id: em modo legado
+  // resolveDoctorId() não sabe resolver médico pra closer (retorna null), o
+  // que faria o bloqueio cair mascarado como 400 "doctor_id necessário" em
+  // vez do 403 explícito que essa ação exige.
+  if (isCloserRole(req)) return res.status(403).json({ error: 'forbidden' });
+  const doctorId = await resolveDoctorId(req, req.body.doctor_id);
+  if (!doctorId) return respondDoctorIdGap(req, res);
+
+  const { data: integ, error: findErr } = await supabase
+    .from('integrations')
+    .select('waba_id, organization_id')
+    .eq('doctor_id', doctorId)
+    .eq('gateway', 'whatsapp')
+    .maybeSingle();
+  if (findErr) { req.log?.error({ err: findErr }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
+  if (!integ?.waba_id) return res.status(409).json({ error: 'whatsapp_waba_not_configured' });
+
+  let credentials;
+  try {
+    credentials = await CredentialVault.resolveWhatsAppSendCredentials({ doctorId });
+  } catch (err) {
+    req.log?.error({ err }, 'WhatsApp integration credential unreadable');
+    return res.status(400).json({ error: 'WhatsApp não configurado para este médico' });
+  }
+  if (!credentials.accessToken) {
+    return res.status(400).json({ error: 'Nenhum token de envio disponível para este médico' });
+  }
+
+  try {
+    const result = await syncWhatsAppTemplates({
+      doctorId,
+      organizationId: integ.organization_id ?? (req.tenant?.enabled ? req.tenant.organizationId : null),
+      wabaId: integ.waba_id,
+      accessToken: credentials.accessToken,
+    });
+    res.json({
+      synced: result.synced,
+      upserted: result.upserted,
+      deactivated: result.deactivated,
+      synced_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    // Nunca loga err.message (pode ecoar texto da resposta da Meta) — só um
+    // código sanitizado, nunca o token nem a resposta bruta.
+    req.log?.error({ err: { code: err?.code || 'template_sync_failed' } }, 'WhatsApp template sync failed');
+    return res.status(502).json({ error: 'whatsapp_template_sync_failed', requestId: req.id });
+  }
+});
+
+// GET /integrations/whatsapp/templates?doctor_id=
+// Nunca devolve meta_template_id bruto de componentes, waba_id ou token —
+// só os campos necessários para o seletor de campanha e para a tela de
+// Integrações mostrar quantidade de aprovados + última sincronização.
+router.get('/whatsapp/templates', async (req, res) => {
+  const doctorId = await resolveDoctorId(req, req.query.doctor_id);
+  if (!doctorId) return respondDoctorIdGap(req, res);
+
+  const { data, error } = await supabase
+    .from('whatsapp_templates')
+    .select('id, meta_template_id, nome, idioma, categoria, status, body_text, body_variable_count, supported, unsupported_reason, active, last_synced_at')
+    .eq('doctor_id', doctorId)
+    .order('nome', { ascending: true });
+  if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
+
+  const rows = data || [];
+  const lastSyncedAt = rows.reduce((max, t) => (t.last_synced_at && (!max || t.last_synced_at > max) ? t.last_synced_at : max), null);
+  res.json({
+    templates: rows,
+    approved_count: rows.filter(isTemplateSelectable).length,
+    last_synced_at: lastSyncedAt,
   });
 });
 

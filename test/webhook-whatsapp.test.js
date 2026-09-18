@@ -26,7 +26,7 @@ vi.mock('../src/lib/supabase.js', () => ({
 }));
 vi.mock('../src/lib/iaAgent.js', () => ({ processarMensagemComIA }));
 vi.mock('../src/lib/knowledgeChunks.js', () => ({ buscarChunksRelevantes: vi.fn(async () => []) }));
-vi.mock('../src/lib/whatsapp.js', () => ({ sendWhatsAppMessage }));
+vi.mock('../src/lib/whatsapp.js', () => ({ sendWhatsAppMessage, sendWhatsAppTemplate: vi.fn(async () => ({ messageId: 'wamid.mock' })) }));
 vi.mock('../src/lib/distribuicao.js', () => ({ escolherCloserAutomatico: vi.fn(async () => null) }));
 
 const { app } = await import('../src/server.js');

@@ -334,6 +334,52 @@ export function makeDb(initial = {}) {
       rpcAudit(p_organization_id, p_actor_user_id, p_target_user_id, 'set_units', 'success', { unit_count: (p_unit_ids || []).length });
       return ok({ unit_ids: p_unit_ids });
     },
+
+    // FASE 2 — espelha migrations/0017_whatsapp_template_campaigns.sql:
+    // upsert de todos os templates recebidos, active=false só pros que já
+    // existiam e não vieram nesta lista, NUNCA deleta linha nenhuma.
+    whatsapp_templates_sync_replace({ p_doctor_id, p_organization_id, p_templates }) {
+      if (!p_doctor_id) return rpcErr('invalid_argument');
+      if (!table('doctors').some((d) => d.id === p_doctor_id)) return rpcErr('not_found');
+      const items = Array.isArray(p_templates) ? p_templates : [];
+      const seenIds = new Set(items.map((i) => i.meta_template_id));
+      const rows = table('whatsapp_templates');
+      let upserted = 0;
+      for (const item of items) {
+        if (!item.meta_template_id) return rpcErr('invalid_argument');
+        const existing = rows.find((r) => r.doctor_id === p_doctor_id && r.meta_template_id === item.meta_template_id);
+        const now = new Date().toISOString();
+        if (existing) {
+          Object.assign(existing, {
+            organization_id: p_organization_id, nome: item.nome, idioma: item.idioma, categoria: item.categoria,
+            status: item.status, parameter_format: item.parameter_format, componentes: item.componentes || [],
+            body_text: item.body_text, body_variable_count: item.body_variable_count ?? 0,
+            supported: !!item.supported, unsupported_reason: item.unsupported_reason ?? null,
+            active: true, last_synced_at: now, updated_at: now,
+          });
+        } else {
+          rows.push({
+            id: `mock-whatsapp_templates-${rows.length + 1}`,
+            doctor_id: p_doctor_id, organization_id: p_organization_id, meta_template_id: item.meta_template_id,
+            nome: item.nome, idioma: item.idioma, categoria: item.categoria, status: item.status,
+            parameter_format: item.parameter_format, componentes: item.componentes || [],
+            body_text: item.body_text, body_variable_count: item.body_variable_count ?? 0,
+            supported: !!item.supported, unsupported_reason: item.unsupported_reason ?? null,
+            active: true, last_synced_at: now, created_at: now, updated_at: now,
+          });
+        }
+        upserted += 1;
+      }
+      let deactivated = 0;
+      for (const row of rows) {
+        if (row.doctor_id === p_doctor_id && row.active && !seenIds.has(row.meta_template_id)) {
+          row.active = false;
+          row.updated_at = new Date().toISOString();
+          deactivated += 1;
+        }
+      }
+      return ok({ upserted, deactivated, seen: items.length });
+    },
   };
 
   const client = {

@@ -22,7 +22,7 @@ const csv = (...rows) => [header, ...rows].join('\n');
 
 let db;
 vi.mock('../src/lib/supabase.js', () => ({ get supabase() { return db.client; } }));
-vi.mock('../src/lib/whatsapp.js', () => ({ sendWhatsAppMessage: vi.fn(async () => ({})) }));
+vi.mock('../src/lib/whatsapp.js', () => ({ sendWhatsAppMessage: vi.fn(async () => ({})), sendWhatsAppTemplate: vi.fn(async () => ({ messageId: 'wamid.mock' })) }));
 vi.mock('../src/lib/googleCalendar.js', () => ({ criarEventoNoGoogle: vi.fn(), temConflito: vi.fn(async () => false), buildAuthUrl: () => '#', trocarCodigoPorTokens: vi.fn(), estaConectado: vi.fn(async () => false) }));
 vi.mock('../src/lib/distribuicao.js', () => ({ escolherCloserAutomatico: vi.fn(async () => null) }));
 
@@ -302,9 +302,19 @@ describe('lead import endpoints', () => {
       { import_id: importA, lead_id: 'eligible', status: 'criado' },
       { import_id: importA, lead_id: 'blocked', status: 'atualizado' },
     );
-    const rejected = await request(app).post('/campanhas').set(auth('a')).send({ doctor_id: doctorA, nome: 'X', mensagem: 'Oi', import_id: importB });
+    // FASE 2 — import_id exige modo_envio='template'. Sem variáveis, pra
+    // manter o teste focado em import/elegibilidade, não em templates.
+    const templateId = '20000000-0000-4000-8000-000000000001';
+    db.tables.whatsapp_templates = [{
+      id: templateId, doctor_id: doctorA, meta_template_id: 'mt1', nome: 'confirmacao', idioma: 'pt_BR',
+      categoria: 'UTILITY', status: 'APPROVED', body_text: 'Olá!', body_variable_count: 0,
+      supported: true, active: true, last_synced_at: new Date().toISOString(),
+    }];
+    const rejected = await request(app).post('/campanhas').set(auth('a'))
+      .send({ doctor_id: doctorA, nome: 'X', import_id: importB, modo_envio: 'template', whatsapp_template_id: templateId });
     expect(rejected.status).toBe(403);
-    const created = await request(app).post('/campanhas').set(auth('a')).send({ doctor_id: doctorA, nome: 'X', mensagem: 'Oi', import_id: importA });
+    const created = await request(app).post('/campanhas').set(auth('a'))
+      .send({ doctor_id: doctorA, nome: 'X', import_id: importA, modo_envio: 'template', whatsapp_template_id: templateId });
     expect(created.status).toBe(200);
     expect(created.body).toMatchObject({ import_id: importA, total_leads: 2, elegiveis: 1, bloqueados: 1 });
   });

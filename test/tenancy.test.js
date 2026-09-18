@@ -21,7 +21,7 @@ vi.mock('../src/lib/supabase.js', () => ({
     return db.client;
   },
 }));
-vi.mock('../src/lib/whatsapp.js', () => ({ sendWhatsAppMessage: vi.fn(async () => ({})) }));
+vi.mock('../src/lib/whatsapp.js', () => ({ sendWhatsAppMessage: vi.fn(async () => ({})), sendWhatsAppTemplate: vi.fn(async () => ({ messageId: 'wamid.mock' })) }));
 vi.mock('../src/lib/googleCalendar.js', () => ({
   criarEventoNoGoogle: vi.fn(async () => null),
   temConflito: vi.fn(async () => false),

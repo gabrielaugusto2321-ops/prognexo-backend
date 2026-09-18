@@ -35,6 +35,24 @@ const schema = z.object({
   // src/lib/embeddedSignup.js. Formato validado (/^v\d+\.\d+$/) pelo próprio
   // schema — nunca aceita um valor fora do padrão "vNN.N" da Meta.
   META_GRAPH_API_VERSION: z.string().regex(/^v\d+\.\d+$/).default('v26.0'),
+  // FASE 2 — campanhas por template. Nunca tentamos adivinhar o tier de
+  // throughput da Meta (Tier 1/2/3): o operador configura um teto seguro
+  // manualmente. O pacing é feito EM MEMÓRIA no worker (setTimeout serial por
+  // médico) — só é correto com uma única instância de worker (WEB_CONCURRENCY=1
+  // no MVP); múltiplas instâncias paralelas não compartilham esse intervalo e
+  // poderiam ultrapassar o limite combinado com a Meta.
+  WHATSAPP_CAMPAIGN_MAX_RECIPIENTS: z.string().regex(/^\d+$/).default('100'),
+  WHATSAPP_SEND_INTERVAL_MS: z.string().regex(/^\d+$/).default('1000'),
+  // Idade máxima de uma trava `envio_iniciado_em` (campanha_envios) antes de
+  // ser considerada abandonada (worker morto no meio do envio, nunca
+  // resolveu o resultado). Tem que ser BEM maior que o timeout HTTP da
+  // chamada à Meta (20s, ver sendWhatsAppTemplate em src/lib/whatsapp.js) —
+  // senão uma execução concorrente ainda em voo seria confundida com uma
+  // abandonada. E tem que ser BEM menor que o lease do job (300s, ver
+  // job_claim em src/lib/jobQueue.js) — senão a detecção demoraria quase o
+  // lease inteiro pra reagir a um worker morto. Default 60s: >>20s (timeout
+  // Meta) e <<300s (lease do job).
+  WHATSAPP_SEND_LOCK_STALE_MS: z.string().regex(/^\d+$/).default('60000'),
   VOYAGE_API_KEY: optionalSecret,
   RESEND_API_KEY: optionalSecret,
   CRON_SECRET: optionalSecret,
