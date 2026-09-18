@@ -249,7 +249,15 @@ async function ensurePipelineDeal(lead) {
     etapa: PIPELINE_STAGES.has(lead.status_atual) ? lead.status_atual : 'lead',
     sdr_responsavel_id: lead.sdr_responsavel_id || null,
   });
-  if (error) throw error;
+  if (error) {
+    // Corrida: outra requisição (reparo concorrente do mesmo lote — ex.: dois
+    // reenvios simultâneos do mesmo CSV) já criou o cartão entre o select
+    // acima e este insert. O índice único parcial `deals_lead_id_pipeline_unique`
+    // (migration 0018) barra o segundo insert com 23505 — nunca um erro de
+    // verdade, só confirma que o cartão já existe e segue em frente.
+    if (error.code === '23505') return;
+    throw error;
+  }
 }
 
 async function reconcileImportDeals(importId, doctorId) {

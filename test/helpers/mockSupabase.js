@@ -133,6 +133,19 @@ export function makeDb(initial = {}) {
             }
           }
         }
+        // deals tem um índice único PARCIAL (lead_id) WHERE product_id IS NULL
+        // (migration 0018) — simulado aqui só pro INSERT puro, pra testar a
+        // corrida de dois reparos concorrentes do mesmo lote de import criando
+        // dois cartões de pipeline pro mesmo lead (nunca dois).
+        if (op === 'insert' && name === 'deals') {
+          for (const item of items) {
+            if (item.product_id != null) continue;
+            const dup = rows.find((r) => r.lead_id === item.lead_id && r.product_id == null);
+            if (dup) {
+              return Promise.resolve({ data: null, error: { code: '23505', message: 'duplicate key value violates unique constraint "deals_lead_id_pipeline_unique"' } });
+            }
+          }
+        }
         for (const item of items) {
           const row = { id: item.id || `mock-${name}-${rows.length + 1}`, ...item };
           if (op === 'upsert') {

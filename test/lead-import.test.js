@@ -248,6 +248,74 @@ describe('lead import endpoints', () => {
     expect(db.tables.deals).toHaveLength(3);
   });
 
+  it('correção 0018 — dois reenvios simultâneos do mesmo CSV reparando o mesmo lote concluído: exatamente um cartão por lead, nunca 500', async () => {
+    const body = csv('Alfa;11987654321;;;nao;', 'Beta;11988888888;;;nao;', 'Gama;11977777777;;;nao;');
+    const url = `/leads/import/commit?doctor_id=${doctorA}&nome_lista=Teste&filename=teste.csv`;
+    const first = await request(app).post(url).set(auth('a')).set('Content-Type', 'text/csv').send(body);
+    expect(first.status).toBe(200);
+    // Simula um lote concluído ANTES desta correção — sem nenhum cartão ainda.
+    db.tables.deals.splice(0, db.tables.deals.length);
+    const leadIds = db.tables.leads.map((l) => l.id);
+
+    const [r1, r2] = await Promise.all([
+      request(app).post(url).set(auth('a')).set('Content-Type', 'text/csv').send(body),
+      request(app).post(url).set(auth('a')).set('Content-Type', 'text/csv').send(body),
+    ]);
+    expect(r1.status).toBe(200);
+    expect(r2.status).toBe(200);
+    expect(db.tables.leads).toHaveLength(3); // nenhum lead duplicado
+    expect(db.tables.deals).toHaveLength(3); // exatamente um cartão por lead, nunca dois
+    expect(new Set(db.tables.deals.map((d) => d.lead_id))).toEqual(new Set(leadIds));
+  });
+
+  it('correção 0018 — corrida forçada entre o SELECT e o INSERT do cartão: 23505 nunca vira 500, nunca duplica (determinístico, não depende de timing real)', async () => {
+    // O teste acima com Promise.all é um smoke test de integração honesto,
+    // mas essa janela de corrida é curta demais pra depender de como o
+    // Node agenda as duas requisições — passa mesmo se a correção for
+    // removida (ver histórico: comprovado retirando o guard e rodando só
+    // esse teste, que passou de qualquer jeito). Este aqui força a janela
+    // de propósito: injeta o "cartão concorrente" bem no meio do SELECT
+    // desta própria execução, então o INSERT dela SEMPRE bate no 23505.
+    const body = csv('Alfa;11987654321;;;nao;');
+    const url = `/leads/import/commit?doctor_id=${doctorA}&nome_lista=Teste&filename=teste.csv`;
+    const first = await request(app).post(url).set(auth('a')).set('Content-Type', 'text/csv').send(body);
+    expect(first.status).toBe(200);
+    const leadId = db.tables.leads[0].id;
+    db.tables.deals.splice(0, db.tables.deals.length); // simula lote concluído sem cartão ainda
+
+    const originalFrom = db.client.from;
+    let injected = false;
+    db.client.from = function patchedFrom(table) {
+      const q = originalFrom.call(this, table);
+      if (table === 'deals' && !injected) {
+        const originalMaybeSingle = q.maybeSingle.bind(q);
+        q.maybeSingle = async () => {
+          const result = await originalMaybeSingle();
+          // No instante exato em que ESTA execução acabou de olhar e não
+          // achou nada, uma requisição "concorrente" já grava o cartão —
+          // exatamente a corrida que o índice único parcial (migration
+          // 0018) e o catch de 23505 em ensurePipelineDeal existem pra cobrir.
+          injected = true;
+          db.tables.deals.push({ id: 'concurrent-winner', lead_id: leadId, product_id: null, etapa: 'lead' });
+          return result;
+        };
+      }
+      return q;
+    };
+
+    let res;
+    try {
+      res = await request(app).post(url).set(auth('a')).set('Content-Type', 'text/csv').send(body);
+    } finally {
+      db.client.from = originalFrom;
+    }
+
+    expect(injected).toBe(true); // confirma que a corrida foi realmente forçada
+    expect(res.status).toBe(200); // nunca 500 — o 23505 é absorvido, não propagado
+    expect(db.tables.deals).toHaveLength(1); // nunca dois cartões pro mesmo lead
+    expect(db.tables.deals[0].lead_id).toBe(leadId);
+  });
+
   it('mantém a etapa atual e o responsável ao reparar apenas um cartão ausente', async () => {
     const body = csv('Alfa;11987654321;;;nao;', 'Beta;11988888888;;;nao;');
     const url = `/leads/import/commit?doctor_id=${doctorA}&nome_lista=Teste&filename=teste.csv`;
