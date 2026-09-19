@@ -72,6 +72,26 @@ describe('META_GRAPH_API_VERSION — fonte única de verdade', () => {
     vi.resetModules();
   });
 
+  it('Embedded Signup usa explicitamente o token do cliente ao registrar o número e inscrever a WABA', async () => {
+    vi.resetModules();
+    const { registerPhoneNumber, subscribeAppToWaba } = await import('../src/lib/embeddedSignup.js');
+    const calls = [];
+    global.fetch = vi.fn(async (url, opts) => {
+      calls.push({ url: String(url), opts });
+      return { ok: true, json: async () => ({ success: true }) };
+    });
+
+    await registerPhoneNumber('phone-client', 'client-business-token');
+    await subscribeAppToWaba('waba-client', 'client-business-token');
+
+    expect(calls).toHaveLength(2);
+    for (const call of calls) {
+      expect(call.opts.headers.Authorization).toBe('Bearer client-business-token');
+      expect(call.opts.headers.Authorization).not.toContain('system-fallback-token');
+    }
+    vi.resetModules();
+  });
+
   it('payload de texto livre permanece byte/logicamente equivalente, só a versão na URL muda', async () => {
     vi.resetModules();
     const { sendWhatsAppMessage } = await import('../src/lib/whatsapp.js');

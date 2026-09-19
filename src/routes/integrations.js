@@ -155,30 +155,64 @@ router.post('/whatsapp/embedded-callback', async (req, res) => {
     return res.status(400).json({ error: 'code, waba_id e phone_number_id são obrigatórios' });
   }
 
+  // O id da linha é necessário para cifrar o token com AAD amarrada ao
+  // registro/tenant certo. Também evita concluir ações na Meta sem existir
+  // um destino local inequívoco para a credencial recém-obtida.
+  const { data: alvo, error: findErr } = await supabase
+    .from('integrations')
+    .select('id')
+    .eq('doctor_id', doctorId)
+    .eq('gateway', 'whatsapp')
+    .maybeSingle();
+  if (findErr) { req.log?.error({ err: findErr }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
+  if (!alvo) return res.status(404).json({ error: 'integração não encontrada' });
+
+  let accessToken;
+
   try {
-    // Confirma que o login foi concluído de verdade (a Meta invalida o code
-    // se for reaproveitado, então essa troca também evita replay).
-    await exchangeCodeForToken(code);
+    // A Meta invalida o code se ele for reaproveitado. O token resultante é
+    // específico da conexão concluída e precisa acompanhar todas as ações
+    // desta WABA — usar um token global aqui quebraria o onboarding de uma
+    // empresa cujos ativos não pertencem ao usuário de sistema da Prognexo.
+    accessToken = await exchangeCodeForToken(code);
 
     // Registra o número pra uso na Cloud API e inscreve nosso app nos
     // webhooks dessa WABA — sem isso o número fica "conectado" mas mudo.
-    await registerPhoneNumber(phone_number_id);
-    await subscribeAppToWaba(waba_id);
+    await registerPhoneNumber(phone_number_id, accessToken);
+    await subscribeAppToWaba(waba_id, accessToken);
   } catch (err) {
-    req.log?.error({ err }, 'WhatsApp embedded signup failed');
+    // Não serializa o Error bruto: falhas de OAuth/fetch podem carregar URL
+    // ou detalhes sensíveis (code/app secret) no stack/cause.
+    req.log?.error({ code: err?.code || 'embedded_signup_failed' }, 'WhatsApp embedded signup failed');
     return res.status(502).json({ error: 'embedded_signup_failed', requestId: req.id });
   }
 
+  // Uma única escrita conclui a conexão local. O token nunca volta na
+  // resposta: buildIntegrationCredentialPatch grava plaintext ou envelope
+  // AES-GCM conforme as flags atuais do CredentialVault.
+  const credentialPatch = CredentialVault.buildIntegrationCredentialPatch({
+    id: alvo.id,
+    doctorId,
+    gateway: 'whatsapp',
+    values: { access_token: accessToken },
+  });
   const { data, error } = await supabase
     .from('integrations')
-    .update({ external_id: phone_number_id, waba_id })
-    .eq('doctor_id', doctorId)
-    .eq('gateway', 'whatsapp')
+    .update({ external_id: phone_number_id, waba_id, ...credentialPatch })
+    .eq('id', alvo.id)
     .select('doctor_id, gateway, external_id, waba_id')
     .single();
 
   if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
-  res.json({ ...data, conectado_via: 'embedded_signup' });
+  // Resposta construída por allowlist (não por spread): mesmo se um client
+  // de banco/mocking ignorar a projeção do select, credenciais jamais saem.
+  res.json({
+    doctor_id: data.doctor_id,
+    gateway: data.gateway,
+    external_id: data.external_id,
+    waba_id: data.waba_id,
+    conectado_via: 'embedded_signup',
+  });
 });
 
 // POST /integrations/:id/webhook-token/rotate  { confirm: true }
