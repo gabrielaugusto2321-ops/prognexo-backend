@@ -9,17 +9,17 @@ import { supabase } from './supabase.js';
 // tentar enviar uma mensagem — nunca mais, nunca menos.
 //   - external_id (phone_number_id) é SEMPRE obrigatório: é parte da própria
 //     URL da Graph API (.../{phoneNumberId}/messages), sem fallback possível.
-//   - accessToken tem fallback global pro token de sistema
-//     (process.env.META_SYSTEM_USER_TOKEN) nos 3 caminhos ativos — por isso
-//     um médico sem token PRÓPRIO ainda pode estar operacional.
+//   - a tela de prontidão exige a credencial PRÓPRIA da integração. O token
+//     global continua disponível no caminho de envio apenas como compatibilidade
+//     legada, mas não pode fazer uma conta nova parecer conectada: ele pode não
+//     ter acesso aos ativos/WABA daquele cliente.
 //   - waba_id NUNCA é lido no caminho de envio (só é usado no momento do
 //     Embedded Signup, pra inscrever o app na WABA) — por isso nunca entra
 //     nesta conta, sozinho ou não.
 export function isWhatsappOperacional(integrationRow) {
   const temExternalId = Boolean(integrationRow?.external_id);
   const temTokenProprio = Boolean(integrationRow?.access_token || integrationRow?.access_token_encrypted);
-  const temTokenDeSistema = Boolean(process.env.META_SYSTEM_USER_TOKEN);
-  return temExternalId && (temTokenProprio || temTokenDeSistema);
+  return temExternalId && temTokenProprio;
 }
 
 // Plataformas de venda (kiwify/hotmart/ticto/pagarme): a existência da linha

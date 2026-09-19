@@ -47,7 +47,7 @@ describe('Paridade WhatsApp — onboarding vs integrações', () => {
     else process.env.META_SYSTEM_USER_TOKEN = ORIGINAL_SYS_TOKEN;
   });
 
-  it('só external_id (cenário do Dr. Samuel), COM token de sistema configurado: as duas rotas concordam em true', async () => {
+  it('só external_id, mesmo COM token de sistema: as duas rotas não fingem que a conta do cliente está pronta', async () => {
     process.env.META_SYSTEM_USER_TOKEN = 'sys-token';
     seed({ integrations: [{ id: 'i1', doctor_id: DOC_A, gateway: 'whatsapp', external_id: '5511999999999' }] });
 
@@ -55,8 +55,8 @@ describe('Paridade WhatsApp — onboarding vs integrações', () => {
     const integrations = await getIntegrations(DOC_A);
     const waRow = integrations.body.find((i) => i.gateway === 'whatsapp');
 
-    expect(onboarding.body.whatsapp).toBe(true);
-    expect(waRow.whatsapp_operacional).toBe(true);
+    expect(onboarding.body.whatsapp).toBe(false);
+    expect(waRow.whatsapp_operacional).toBe(false);
   });
 
   it('só external_id, SEM token de sistema e sem token próprio: as duas rotas concordam em false', async () => {

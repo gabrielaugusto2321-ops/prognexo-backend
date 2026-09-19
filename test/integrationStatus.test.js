@@ -22,9 +22,9 @@ describe('isWhatsappOperacional', () => {
     else process.env.META_SYSTEM_USER_TOKEN = ORIGINAL;
   });
 
-  it('external_id + token de sistema (sem token próprio) => operacional', () => {
+  it('external_id + token de sistema (sem token próprio) => NÃO operacional para o onboarding do cliente', () => {
     process.env.META_SYSTEM_USER_TOKEN = 'sys-token';
-    expect(isWhatsappOperacional({ external_id: 'phone1', access_token: null, access_token_encrypted: null })).toBe(true);
+    expect(isWhatsappOperacional({ external_id: 'phone1', access_token: null, access_token_encrypted: null })).toBe(false);
   });
 
   it('external_id sem qualquer token (nem próprio, nem de sistema) => NÃO operacional', () => {
