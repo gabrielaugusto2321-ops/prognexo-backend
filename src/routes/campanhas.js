@@ -47,7 +47,79 @@ async function campaignCounts(campaign) {
   return { elegiveis, bloqueados: all.length - elegiveis };
 }
 
-const enrichCampaign = async (campaign) => ({ ...campaign, ...(await campaignCounts(campaign)) });
+const CAMPAIGN_FAILURE_STATUSES = new Set(['falhou', 'template_indisponivel']);
+const CAMPAIGN_BLOCKED_STATUSES = new Set([
+  'pendente_template', 'sem_autorizacao', 'opt_out',
+  'invalid_recipient_phone', 'phone_identity_review_required',
+]);
+
+// Resumo seguro para a UI: só estados internos e códigos numéricos já
+// sanitizados. Nunca devolve telefone, payload da Meta ou mensagem crua.
+export function summarizeCampaignDeliveries(rows = []) {
+  const porStatus = {};
+  const porMetaStatus = {};
+  const codigosErro = {};
+  for (const row of rows) {
+    const status = row?.status || 'desconhecido';
+    porStatus[status] = (porStatus[status] || 0) + 1;
+    if (row?.meta_status) {
+      const metaStatus = String(row.meta_status);
+      porMetaStatus[metaStatus] = (porMetaStatus[metaStatus] || 0) + 1;
+    }
+    if (row?.meta_error_code) {
+      const code = String(row.meta_error_code);
+      codigosErro[code] = (codigosErro[code] || 0) + 1;
+    }
+  }
+  const count = (statuses) => [...statuses].reduce((total, status) => total + (porStatus[status] || 0), 0);
+  const falhasEnvio = count(CAMPAIGN_FAILURE_STATUSES);
+  const falhasEntrega = porMetaStatus.failed || 0;
+  return {
+    total_processados: rows.length,
+    enviados: porStatus.enviado || 0,
+    // Uma falha pode ocorrer na chamada inicial ou depois, por webhook de
+    // entrega. Os conjuntos não se sobrepõem no fluxo atual, mas o cálculo
+    // por linha evita dupla contagem caso um registro legado tenha ambos.
+    falhas: rows.filter((row) => CAMPAIGN_FAILURE_STATUSES.has(row?.status)
+      || row?.meta_status === 'failed').length,
+    falhas_envio: falhasEnvio,
+    falhas_entrega: falhasEntrega,
+    entregues: (porMetaStatus.delivered || 0) + (porMetaStatus.read || 0),
+    lidos: porMetaStatus.read || 0,
+    bloqueados: count(CAMPAIGN_BLOCKED_STATUSES),
+    resultado_desconhecido: porStatus.resultado_desconhecido || 0,
+    em_processamento: porStatus.enviando || 0,
+    por_status: porStatus,
+    por_meta_status: porMetaStatus,
+    codigos_erro: codigosErro,
+  };
+}
+
+function campaignDisplayStatus(campaign, resultados) {
+  if (campaign.status !== 'concluida') return campaign.status;
+  if (resultados.falhas > 0 || resultados.resultado_desconhecido > 0) return 'concluida_com_falhas';
+  if (resultados.total_processados > 0 && resultados.enviados === 0) return 'concluida_sem_envios';
+  return 'concluida';
+}
+
+async function campaignDeliverySummary(campaignId) {
+  const { data, error } = await supabase.from('campanha_envios')
+    .select('status, meta_status, meta_error_code').eq('campanha_id', campaignId);
+  if (error) throw error;
+  return summarizeCampaignDeliveries(data || []);
+}
+
+const enrichCampaign = async (campaign) => {
+  const [counts, resultados] = await Promise.all([
+    campaignCounts(campaign), campaignDeliverySummary(campaign.id),
+  ]);
+  return {
+    ...campaign,
+    ...counts,
+    resultados,
+    status_exibicao: campaignDisplayStatus(campaign, resultados),
+  };
+};
 
 // `Number(x) || default` trataria '0' (configuração legítima — pacing
 // desligado) como "ausente" e cairia no default, já que 0 é falsy em JS.

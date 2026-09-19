@@ -147,6 +147,47 @@ describe('POST /campanhas — validações de modo_envio', () => {
   });
 });
 
+describe('GET /campanhas — resultado real do disparo', () => {
+  it('expõe falhas sanitizadas e diferencia concluída com falhas de concluída com sucesso', async () => {
+    db.tables.campanhas.push({
+      id: 'CAMP-RESULT', doctor_id: DOC_A, nome: 'Campanha resultado',
+      status: 'concluida', modo_envio: 'template', import_id: null,
+    });
+    db.tables.campanha_envios.push(
+      { campanha_id: 'CAMP-RESULT', lead_id: 'L1', status: 'falhou', meta_error_code: '190' },
+      { campanha_id: 'CAMP-RESULT', lead_id: 'L2', status: 'resultado_desconhecido', meta_error_code: null },
+      { campanha_id: 'CAMP-RESULT', lead_id: 'L3', status: 'opt_out', meta_error_code: null },
+      { campanha_id: 'CAMP-RESULT', lead_id: 'L4', status: 'enviado', meta_status: 'read', meta_error_code: null },
+      // A Meta pode aceitar a chamada e só depois reportar falha de entrega.
+      { campanha_id: 'CAMP-RESULT', lead_id: 'L5', status: 'enviado', meta_status: 'failed', meta_error_code: '131026' },
+    );
+
+    const res = await request(app).get(`/campanhas?doctor_id=${DOC_A}`)
+      .set({ Authorization: 'Bearer owner' });
+
+    expect(res.status).toBe(200);
+    const campaign = res.body.find((row) => row.id === 'CAMP-RESULT');
+    expect(campaign.status).toBe('concluida'); // estado persistido permanece compatível
+    expect(campaign.status_exibicao).toBe('concluida_com_falhas');
+    expect(campaign.resultados).toEqual({
+      total_processados: 5,
+      enviados: 2,
+      falhas: 2,
+      falhas_envio: 1,
+      falhas_entrega: 1,
+      entregues: 1,
+      lidos: 1,
+      bloqueados: 1,
+      resultado_desconhecido: 1,
+      em_processamento: 0,
+      por_status: { falhou: 1, resultado_desconhecido: 1, opt_out: 1, enviado: 2 },
+      por_meta_status: { read: 1, failed: 1 },
+      codigos_erro: { 190: 1, 131026: 1 },
+    });
+    expect(JSON.stringify(campaign.resultados)).not.toMatch(/telefone|token|payload/i);
+  });
+});
+
 describe('POST /campanhas/:id/enviar — modo template', () => {
   const settle = () => new Promise((r) => setTimeout(r, 400));
 
