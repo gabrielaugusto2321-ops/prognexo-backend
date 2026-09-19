@@ -90,6 +90,42 @@ describe('POST /campanhas — validações de modo_envio', () => {
     expect(res.body.template_snapshot).toMatchObject({ meta_template_id: 'mt-1', body_variable_count: 2 });
   });
 
+  it('regressão de produção — rascunho com template aprovado (hello_world, 0 variáveis) + lista importada de 3 leads não quebra com 500 (mensagem NOT NULL), grava o snapshot do corpo do template', async () => {
+    // Reprodução exata do bug real: "null value in column mensagem of
+    // relation campanhas violates not-null constraint" — o backend deixava
+    // mensagem=null pra campanhas de template, mas a coluna é NOT NULL na
+    // produção real (confirmado via information_schema, não pelo baseline.sql
+    // local desatualizado).
+    const TPL_HELLO = '00000000-0000-4000-8100-0000000tp03';
+    const IMPORT_HELLO = '00000000-0000-4000-8100-0000000aa002';
+    db.tables.whatsapp_templates.push({
+      id: TPL_HELLO, doctor_id: DOC_A, meta_template_id: 'hello_world', nome: 'hello_world', idioma: 'en_US',
+      categoria: 'UTILITY', status: 'APPROVED', body_text: 'Hello World',
+      body_variable_count: 0, supported: true, active: true, last_synced_at: new Date().toISOString(),
+    });
+    db.tables.lead_imports.push({ id: IMPORT_HELLO, doctor_id: DOC_A });
+    db.tables.leads.push(
+      { id: 'H1', doctor_id: DOC_A, nome: 'Ana', telefone_normalizado: '5511900000001', whatsapp_authorization_status: 'autorizado', status_atual: 'lead' },
+      { id: 'H2', doctor_id: DOC_A, nome: 'Bia', telefone_normalizado: '5511900000002', whatsapp_authorization_status: 'autorizado', status_atual: 'lead' },
+      { id: 'H3', doctor_id: DOC_A, nome: 'Caio', telefone_normalizado: '5511900000003', whatsapp_authorization_status: 'autorizado', status_atual: 'lead' },
+    );
+    db.tables.lead_import_rows.push(
+      { import_id: IMPORT_HELLO, lead_id: 'H1', status: 'criado' },
+      { import_id: IMPORT_HELLO, lead_id: 'H2', status: 'criado' },
+      { import_id: IMPORT_HELLO, lead_id: 'H3', status: 'criado' },
+    );
+
+    const res = await request(app).post('/campanhas').set({ Authorization: 'Bearer owner' })
+      .send({ doctor_id: DOC_A, nome: 'Hello World Campaign', import_id: IMPORT_HELLO, modo_envio: 'template', whatsapp_template_id: TPL_HELLO, template_variable_map: {} });
+
+    expect(res.status).toBe(200); // nunca 500
+    expect(res.body.mensagem).toBe('Hello World'); // snapshot do corpo do template, vindo do banco — nunca null
+    expect(res.body.total_leads).toBe(3);
+    expect(res.body.modo_envio).toBe('template');
+    // o envio de verdade continua usando o template, nunca vira texto livre:
+    expect(db.tables.campanhas[db.tables.campanhas.length - 1].whatsapp_template_id).toBe(TPL_HELLO);
+  });
+
   it('import_id sem modo_envio=template é rejeitado', async () => {
     const res = await request(app).post('/campanhas').set({ Authorization: 'Bearer owner' })
       .send({ doctor_id: DOC_A, nome: 'Camp', import_id: IMPORT_A, mensagem: 'oi' });

@@ -135,6 +135,14 @@ router.post('/', async (req, res) => {
     const validation = validateTemplateVariableMap(tmpl.body_variable_count, template_variable_map);
     if (!validation.ok) return res.status(400).json({ error: validation.reason });
     templateSnapshot = buildTemplateSnapshot(tmpl, template_variable_map);
+    // `campanhas.mensagem` é NOT NULL no banco mesmo para campanhas de
+    // template — que nunca usam este campo pra enviar de verdade (o envio de
+    // template sempre lê `template_snapshot`/`whatsapp_template_id`, nunca
+    // `mensagem`; ver processarEnvioCampanha/handleCampaignSendJob). Grava
+    // aqui só um SNAPSHOT do corpo do template já validado no banco
+    // (`tmpl.body_text`) — nunca um texto vindo do cliente, que poderia
+    // divergir do que o template realmente envia.
+    mensagemFinal = tmpl.body_text;
   } else if (!mensagem?.trim()) {
     return res.status(400).json({ error: 'mensagem_obrigatoria_texto_livre' });
   } else {

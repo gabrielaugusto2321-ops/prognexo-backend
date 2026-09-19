@@ -146,6 +146,18 @@ export function makeDb(initial = {}) {
             }
           }
         }
+        // campanhas.mensagem é NOT NULL na produção real (confirmado via
+        // information_schema — o baseline.sql local está desatualizado nisso).
+        // Simulado aqui pra pegar exatamente o bug de produção: campanha de
+        // template gravando mensagem=null porque o backend nunca preenchia
+        // um snapshot do corpo do template nesse modo.
+        if (op === 'insert' && name === 'campanhas') {
+          for (const item of items) {
+            if (item.mensagem == null) {
+              return Promise.resolve({ data: null, error: { code: '23502', message: 'null value in column "mensagem" of relation "campanhas" violates not-null constraint' } });
+            }
+          }
+        }
         for (const item of items) {
           const row = { id: item.id || `mock-${name}-${rows.length + 1}`, ...item };
           if (op === 'upsert') {
