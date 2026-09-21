@@ -30,7 +30,10 @@ router.post('/', async (req, res) => {
 
   const { nome, especialidade, telefone, email, owner_user_id } = req.body;
   if (!nome || !owner_user_id) return res.status(400).json({ error: 'invalid_payload' });
-  const { data, error } = await supabase.from('doctors').insert({ nome, especialidade, telefone, email, owner_user_id, plano: 'gratuito', status: 'pendente' }).select().single();
+  // status 'prospect' — doctors_status_check em produção não aceita 'pendente'
+  // (valores válidos: ativo, prospect, pausado, encerrado). Vira 'ativo' em
+  // POST /activation/complete, quando o owner confirma o e-mail.
+  const { data, error } = await supabase.from('doctors').insert({ nome, especialidade, telefone, email, owner_user_id, plano: 'gratuito', status: 'prospect' }).select().single();
   if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
   res.status(201).json(data);
 });

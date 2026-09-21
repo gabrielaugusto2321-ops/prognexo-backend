@@ -64,6 +64,9 @@ export function makeDb(initial = {}) {
       if (/\busers\s*\(/.test(selectStr) && row.user_id) {
         out.users = table('users').find((u) => u.id === row.user_id) || null;
       }
+      if (/\bdoctors\s*\(/.test(selectStr) && row.doctor_id) {
+        out.doctors = table('doctors').find((d) => d.id === row.doctor_id) || null;
+      }
       // memberships -> membership_units( units(...) ) via membership_id -> unit_id
       if (/\bmembership_units\s*\(/.test(selectStr) && row.id) {
         out.membership_units = table('membership_units')
@@ -275,6 +278,85 @@ export function makeDb(initial = {}) {
   function ok(data) { return { data, error: null }; }
 
   const RPCS = {
+    // Espelha migrations/0019_signup_tenant_provisioning.sql: idempotência
+    // POR ETAPA (nunca um atalho "doctor+map existem -> retorna tudo pronto").
+    // Uma chamada repetida, ou uma retomada de estado parcial (doctor sem
+    // membership, ou membership sem membership_units), precisa completar
+    // exatamente o que falta, sem duplicar nada.
+    reassign_lead_closer({ p_lead_id, p_new_sdr_id, p_actor_user_id }) {
+      const lead = table('leads').find((row) => row.id === p_lead_id);
+      if (!lead) return rpcErr('lead_not_found');
+      const doctor = table('doctors').find((row) => row.id === lead.doctor_id);
+      const map = table('organization_doctor_map').find((row) => row.doctor_id === lead.doctor_id);
+      const organizationId = lead.organization_id || map?.organization_id || null;
+      const actor = table('users').find((row) => row.id === p_actor_user_id);
+      const actorMembership = table('memberships').find((row) => row.organization_id === organizationId
+        && row.user_id === p_actor_user_id && row.status === 'active');
+      const actorAllowed = actor?.role === 'admin'
+        || (actor?.role === 'doctor' && doctor?.owner_user_id === actor.id)
+        || table('platform_admins').some((row) => row.user_id === p_actor_user_id)
+        || ['organization_owner', 'organization_admin', 'platform_admin'].includes(actorMembership?.role);
+      if (!actorAllowed) return rpcErr('forbidden');
+      if (p_new_sdr_id !== null) {
+        const target = table('users').find((row) => row.id === p_new_sdr_id);
+        const legacyCloser = target?.role === 'closer' && table('user_doctor_access')
+          .some((row) => row.user_id === p_new_sdr_id && row.doctor_id === lead.doctor_id);
+        const tenantCloser = organizationId && table('memberships').some((row) => row.organization_id === organizationId
+          && row.user_id === p_new_sdr_id && row.role === 'closer' && row.status === 'active');
+        if (!target || target.ativo !== true || (!legacyCloser && !tenantCloser)) return rpcErr('invalid_closer');
+      }
+      lead.sdr_responsavel_id = p_new_sdr_id;
+      for (const deal of table('deals')) {
+        if (deal.lead_id === p_lead_id) deal.sdr_responsavel_id = p_new_sdr_id;
+      }
+      return ok({ ...lead });
+    },
+    signup_provision_tenant({ p_auth_user_id, p_nome, p_email, p_clinica_nome }) {
+      const clinicName = p_clinica_nome?.trim();
+
+      if (!table('users').some((u) => u.id === p_auth_user_id)) {
+        table('users').push({ id: p_auth_user_id, nome: p_nome, email: p_email, role: 'doctor', ativo: false, status: 'pending' });
+      }
+
+      let doctor = table('doctors').find((d) => d.owner_user_id === p_auth_user_id);
+      if (!doctor) {
+        doctor = { id: `mock-doctors-${table('doctors').length + 1}`, owner_user_id: p_auth_user_id, nome: clinicName || p_nome, status: 'prospect', plano: 'gratuito' };
+        table('doctors').push(doctor);
+      }
+
+      let map = table('organization_doctor_map').find((m) => m.doctor_id === doctor.id);
+      let organizationId = map?.organization_id;
+      let unitId = map?.default_unit_id;
+
+      if (!organizationId) {
+        organizationId = `mock-organizations-${table('organizations').length + 1}`;
+        table('organizations').push({ id: organizationId, name: clinicName || `Organizacao ${doctor.id.slice(0, 8)}`, slug: `org-${doctor.id.replaceAll('-', '')}`, status: 'active' });
+      }
+
+      if (!unitId) {
+        unitId = table('units').find((u) => u.organization_id === organizationId)?.id;
+      }
+      if (!unitId) {
+        unitId = `mock-units-${table('units').length + 1}`;
+        table('units').push({ id: unitId, organization_id: organizationId, name: 'Unidade principal', status: 'active', timezone: 'America/Sao_Paulo' });
+      }
+
+      if (!map) {
+        table('organization_doctor_map').push({ organization_id: organizationId, doctor_id: doctor.id, default_unit_id: unitId });
+      }
+
+      let membership = table('memberships').find((m) => m.organization_id === organizationId && m.user_id === p_auth_user_id);
+      if (!membership) {
+        membership = { id: `mock-memberships-${table('memberships').length + 1}`, organization_id: organizationId, user_id: p_auth_user_id, role: 'organization_owner', status: 'active' };
+        table('memberships').push(membership);
+      }
+
+      if (!table('membership_units').some((mu) => mu.membership_id === membership.id && mu.unit_id === unitId)) {
+        table('membership_units').push({ membership_id: membership.id, unit_id: unitId });
+      }
+
+      return ok([{ doctor_id: doctor.id, organization_id: organizationId, unit_id: unitId, membership_id: membership.id }]);
+    },
     team_member_add({ p_organization_id, p_actor_user_id, p_target_user_id, p_role, p_unit_ids }) {
       if (!table('organizations').some((o) => o.id === p_organization_id)) return rpcErr('not_found');
       if (!table('users').some((u) => u.id === p_target_user_id)) return rpcErr('not_found');

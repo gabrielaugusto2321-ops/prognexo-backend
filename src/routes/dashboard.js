@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { supabase } from '../lib/supabase.js';
-import { requireAuth, getScopedDoctorIds } from '../middleware/auth.js';
-import { attachTenantContext, scopedDoctorIds } from '../lib/tenantContext.js';
+import { requireAuth, getScopedDoctorIds, isScopedToOwnLeadsOnly } from '../middleware/auth.js';
+import { attachTenantContext, scopedDoctorIds, tenantAllowsDoctor } from '../lib/tenantContext.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -12,13 +12,25 @@ router.get('/', async (req, res) => {
   const scopedIds = await scopedDoctorIds(req, getScopedDoctorIds);
   const { doctor_id, periodo_dias = 30 } = req.query;
   const desde = new Date(Date.now() - periodo_dias * 86400000).toISOString();
+  if (doctor_id && !(await tenantAllowsDoctor(req, doctor_id, getScopedDoctorIds))) {
+    return res.status(403).json({ error: 'doctor_out_of_scope' });
+  }
+  const doctorIds = doctor_id ? [doctor_id] : scopedIds;
+  const closerOnly = req.tenant?.enabled
+    ? req.tenant.role === 'closer'
+    : isScopedToOwnLeadsOnly(req.user);
 
-  let leadsQuery = supabase
+  const scopeLeads = (query) => {
+    let scoped = query;
+    if (doctorIds) scoped = scoped.in('doctor_id', doctorIds);
+    if (closerOnly) scoped = scoped.eq('sdr_responsavel_id', req.user.id);
+    return scoped;
+  };
+
+  const leadsQuery = scopeLeads(supabase
     .from('leads')
     .select('id, journey_type, status_atual, criado_em, atendido_por, ia_sem_resposta_count, ia_motivo_handoff')
-    .gte('criado_em', desde);
-  if (doctor_id) leadsQuery = leadsQuery.eq('doctor_id', doctor_id);
-  else if (scopedIds) leadsQuery = leadsQuery.in('doctor_id', scopedIds);
+    .gte('criado_em', desde));
 
   const { data: leads, error } = await leadsQuery;
   if (error) { req.log?.error({ err: error }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
@@ -36,21 +48,36 @@ router.get('/', async (req, res) => {
     : 0;
   const perguntasSemResposta = leads.reduce((soma, l) => soma + (l.ia_sem_resposta_count || 0), 0);
 
-  let transQuery = supabase
-    .from('transactions')
-    .select('valor, status, criado_em')
-    .eq('status', 'pago')
-    .gte('criado_em', desde);
+  const { data: revenueLeads, error: revenueLeadsError } = await scopeLeads(
+    supabase.from('leads').select('id')
+  );
+  if (revenueLeadsError) { req.log?.error({ err: revenueLeadsError }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
 
-  const { data: transacoes } = await transQuery;
+  let transacoes = [];
+  const revenueLeadIds = (revenueLeads || []).map((lead) => lead.id);
+  if (revenueLeadIds.length > 0) {
+    const { data: deals, error: dealsError } = await supabase.from('deals').select('id').in('lead_id', revenueLeadIds);
+    if (dealsError) { req.log?.error({ err: dealsError }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
+    const dealIds = (deals || []).map((deal) => deal.id);
+    if (dealIds.length > 0) {
+      const { data, error: transactionsError } = await supabase
+        .from('transactions')
+        .select('valor, status, criado_em')
+        .in('deal_id', dealIds)
+        .eq('status', 'pago')
+        .gte('criado_em', desde);
+      if (transactionsError) { req.log?.error({ err: transactionsError }, 'Database request failed'); return res.status(500).json({ error: 'internal_error', requestId: req.id }); }
+      transacoes = data || [];
+    }
+  }
   const receita = (transacoes || []).reduce((sum, t) => sum + Number(t.valor), 0);
 
   // "Precisam de você": leads que a IA já entregou pro time humano, mas
   // que ainda não tiveram nenhuma resposta manual de um closer — ou seja,
   // handoff pendente de verdade, não só "atribuído".
-  let precisamDeVoceQuery = supabase.from('leads').select('id, doctor_id').eq('atendido_por', 'humano').gte('criado_em', desde);
-  if (doctor_id) precisamDeVoceQuery = precisamDeVoceQuery.eq('doctor_id', doctor_id);
-  else if (scopedIds) precisamDeVoceQuery = precisamDeVoceQuery.in('doctor_id', scopedIds);
+  const precisamDeVoceQuery = scopeLeads(
+    supabase.from('leads').select('id, doctor_id').eq('atendido_por', 'humano').gte('criado_em', desde)
+  );
   const { data: leadsHumano } = await precisamDeVoceQuery;
 
   let precisamDeVoce = 0;

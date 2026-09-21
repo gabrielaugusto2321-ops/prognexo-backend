@@ -23,7 +23,7 @@ beforeEach(() => {
       { id: PENDING, email: 'p@a.test', role: 'doctor', ativo: false, status: 'pending' },
       { id: OTHER, email: 'o@a.test', role: 'doctor', ativo: false, status: 'pending' },
     ],
-    doctors: [{ id: 'doc1', owner_user_id: PENDING, status: 'pendente' }],
+    doctors: [{ id: 'doc1', owner_user_id: PENDING, status: 'prospect' }],
   });
   // token 'ok' = usuário PENDING com e-mail confirmado
   db.setAuthUser('ok', { id: PENDING, email: 'p@a.test', email_confirmed_at: '2026-01-01T00:00:00Z' });

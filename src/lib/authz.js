@@ -64,3 +64,16 @@ export async function assertUserAccess({ req, userId, doctorId }) {
     .maybeSingle();
   return legacyOk && Boolean(membership);
 }
+
+export async function assertActiveCloserAccess({ req, userId, doctorId }) {
+  const { data: user } = await supabase.from('users').select('id, role, ativo').eq('id', userId).maybeSingle();
+  if (!user || user.ativo !== true) return false;
+  if (req?.tenant?.enabled) {
+    if (!req.tenant.organizationId) return false;
+    const { data: membership } = await supabase.from('memberships').select('id')
+      .eq('user_id', userId).eq('organization_id', req.tenant.organizationId)
+      .eq('role', 'closer').eq('status', 'active').maybeSingle();
+    return Boolean(membership) && req.tenant.doctorId === doctorId;
+  }
+  return user.role === 'closer' && await assertUserAccess({ req, userId, doctorId });
+}

@@ -49,24 +49,14 @@ router.post('/', signupHourlyLimiter, signupDailyLimiter, async (req, res) => {
     }
     authUserId = data.user.id;
 
-    // Conta nasce sempre: doctor, plano gratuito, pendente e inativa.
-    const userResult = await supabase.from('users').insert({
-      id: authUserId,
-      nome,
-      email,
-      role: 'doctor',
-      ativo: false,
-      status: 'pending',
+    // Conta, doctor e tenant nascem juntos em uma unica transacao no banco.
+    const provisionResult = await supabase.rpc('signup_provision_tenant', {
+      p_auth_user_id: authUserId,
+      p_nome: nome,
+      p_email: email,
+      p_clinica_nome: clinica || nome,
     });
-    if (userResult.error) throw userResult.error;
-
-    const doctorResult = await supabase.from('doctors').insert({
-      owner_user_id: authUserId,
-      nome: clinica || nome,
-      status: 'pendente',
-      plano: 'gratuito',
-    });
-    if (doctorResult.error) throw doctorResult.error;
+    if (provisionResult.error) throw provisionResult.error;
   } catch (error) {
     logger.error({ err: error, authUserId }, 'Signup provisioning failed');
     // Compensação: desfaz o auth user se o provisionamento parou no meio.

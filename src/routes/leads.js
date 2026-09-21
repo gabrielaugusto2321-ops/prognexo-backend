@@ -2,7 +2,7 @@ import express, { Router } from 'express';
 import { z } from 'zod';
 import { supabase } from '../lib/supabase.js';
 import { requireAuth, getScopedDoctorIds, isScopedToOwnLeadsOnly } from '../middleware/auth.js';
-import { authorizeResource, assertRelatedBelongs, assertUserAccess } from '../lib/authz.js';
+import { authorizeResource, assertRelatedBelongs, assertUserAccess, assertActiveCloserAccess } from '../lib/authz.js';
 import { escolherCloserAutomatico } from '../lib/distribuicao.js';
 import { attachTenantContext, scopedDoctorIds, tenantAllowsDoctor } from '../lib/tenantContext.js';
 import { processImportFile, sha256Hex, MAX_BYTES } from '../lib/leadImport.js';
@@ -41,11 +41,38 @@ const updateSchema = z
   })
   .strict();
 
+const CLOSER_ASSIGNMENT_TENANT_ROLES = new Set(['organization_owner', 'organization_admin']);
+
+function canAssignCloser(req, lead) {
+  if (req.tenant?.enabled) {
+    return req.tenant.isPlatformAdmin === true || CLOSER_ASSIGNMENT_TENANT_ROLES.has(req.tenant.role);
+  }
+  return req.user?.role === 'admin'
+    || (req.user?.role === 'doctor' && lead.doctor_id && req.user.id === lead.doctors?.owner_user_id);
+}
+
+function reassignErrorResponse(error) {
+  const message = error?.message || '';
+  if (message.includes('lead_not_found')) return { status: 404, error: 'not_found' };
+  if (message.includes('forbidden')) return { status: 403, error: 'forbidden' };
+  if (message.includes('invalid_closer')) return { status: 400, error: 'invalid_closer' };
+  return null;
+}
+
 // GET /leads?doctor_id=&journey_type=&status=
 router.get('/', async (req, res, next) => {
   try {
     const scopedIds = await scopedDoctorIds(req, getScopedDoctorIds);
     const { doctor_id, journey_type, status } = req.query;
+
+    // O .in(scopedIds) abaixo já impedia ampliação de escopo mesmo sem esta
+    // checagem (um doctor_id fora do scopedIds nunca batia nenhuma linha),
+    // mas um doctor_id inválido merecia uma resposta explícita — não um 200
+    // silenciosamente vazio — para não mascarar erro de cliente nem deixar
+    // ambíguo se "vazio" significa "sem leads" ou "sem acesso".
+    if (doctor_id && !(await tenantAllowsDoctor(req, doctor_id, getScopedDoctorIds))) {
+      return res.status(403).json({ error: 'doctor_out_of_scope' });
+    }
 
     let query = supabase.from('leads').select('*').order('criado_em', { ascending: false });
 
@@ -557,30 +584,53 @@ router.patch('/:id', async (req, res, next) => {
       table: 'leads',
       id: req.params.id,
       requireOwnerForCloser: true,
+      select: '*, doctors(owner_user_id)',
     });
     if (!auth.ok) return res.status(auth.reason === 'not_found' ? 404 : 403).json({ error: auth.reason });
 
     const parsed = updateSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: 'invalid_payload' });
 
-    // Closer não pode reatribuir responsável
-    if (req.user.role === 'closer' && 'sdr_responsavel_id' in parsed.data) {
+    const hasCloserAssignment = Object.hasOwn(parsed.data, 'sdr_responsavel_id');
+    // Atribuição de closer é atômica via RPC (migration 0020) e não pode se
+    // misturar com nenhum outro campo — não existe transação única cobrindo
+    // "reassign_lead_closer + update de outros campos" juntos, então um
+    // payload misto poderia deixar o lead reatribuído mesmo se o resto
+    // falhasse depois. Rejeita ANTES de tocar a RPC — nenhuma alteração.
+    if (hasCloserAssignment && Object.keys(parsed.data).length > 1) {
+      return res.status(400).json({ error: 'assignment_must_be_separate' });
+    }
+    if (hasCloserAssignment && !canAssignCloser(req, auth.row)) {
       return res.status(403).json({ error: 'forbidden' });
     }
-    if (
-      parsed.data.sdr_responsavel_id &&
-      !(await assertUserAccess({ req, userId: parsed.data.sdr_responsavel_id, doctorId: auth.row.doctor_id }))
-    ) {
-      return res.status(403).json({ error: 'related_resource_forbidden' });
+    if (hasCloserAssignment && parsed.data.sdr_responsavel_id
+      && !(await assertActiveCloserAccess({ req, userId: parsed.data.sdr_responsavel_id, doctorId: auth.row.doctor_id }))) {
+      return res.status(400).json({ error: 'invalid_closer' });
     }
 
-    const { data, error } = await supabase
-      .from('leads')
-      .update(parsed.data)
-      .eq('id', req.params.id)
-      .select()
-      .single();
-    if (error) throw error;
+    let data;
+    if (hasCloserAssignment) {
+      const { data: reassigned, error: rpcError } = await supabase.rpc('reassign_lead_closer', {
+        p_lead_id: req.params.id,
+        p_new_sdr_id: parsed.data.sdr_responsavel_id,
+        p_actor_user_id: req.user.id,
+      });
+      if (rpcError) {
+        const mapped = reassignErrorResponse(rpcError);
+        if (mapped) return res.status(mapped.status).json({ error: mapped.error });
+        throw rpcError;
+      }
+      data = Array.isArray(reassigned) ? reassigned[0] : reassigned;
+    }
+
+    const ordinaryPatch = { ...parsed.data };
+    delete ordinaryPatch.sdr_responsavel_id;
+    if (Object.keys(ordinaryPatch).length > 0) {
+      const { data: updated, error } = await supabase.from('leads')
+        .update(ordinaryPatch).eq('id', req.params.id).select().single();
+      if (error) throw error;
+      data = updated;
+    }
     res.json(data);
   } catch (e) {
     next(e);
