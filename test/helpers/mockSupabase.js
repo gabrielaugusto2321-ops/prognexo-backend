@@ -278,6 +278,38 @@ export function makeDb(initial = {}) {
   function ok(data) { return { data, error: null }; }
 
   const RPCS = {
+    // Espelha migrations/0021_doctor_courtesy_expiration.sql's
+    // doctor_access_gate: idem à decisão de bloqueio em uma única "query".
+    // Nunca bloqueia em caso de ambiguidade (ver comentário na migration).
+    doctor_access_gate({ p_user_id, p_organization_id }) {
+      const user = table('users').find((u) => u.id === p_user_id);
+      const isAdmin = user?.role === 'admin'
+        || table('platform_admins').some((pa) => pa.user_id === p_user_id);
+      if (isAdmin) return ok([{ blocked: false, reason: null }]);
+
+      let doctorId = null;
+      if (p_organization_id) {
+        const map = table('organization_doctor_map').find((m) => m.organization_id === p_organization_id);
+        doctorId = map?.doctor_id ?? null;
+      } else {
+        const owned = table('doctors').filter((d) => d.owner_user_id === p_user_id);
+        if (owned.length === 1) {
+          doctorId = owned[0].id;
+        } else {
+          const access = table('user_doctor_access').filter((a) => a.user_id === p_user_id);
+          if (access.length === 1) doctorId = access[0].doctor_id;
+        }
+      }
+      if (!doctorId) return ok([{ blocked: false, reason: null }]);
+
+      const doctor = table('doctors').find((d) => d.id === doctorId);
+      if (!doctor) return ok([{ blocked: false, reason: null }]);
+      if (doctor.status === 'pausado') return ok([{ blocked: true, reason: 'account_paused' }]);
+      if (doctor.courtesy_expires_at && new Date(doctor.courtesy_expires_at).getTime() < Date.now()) {
+        return ok([{ blocked: true, reason: 'courtesy_expired' }]);
+      }
+      return ok([{ blocked: false, reason: null }]);
+    },
     // Espelha migrations/0019_signup_tenant_provisioning.sql: idempotência
     // POR ETAPA (nunca um atalho "doctor+map existem -> retorna tudo pronto").
     // Uma chamada repetida, ou uma retomada de estado parcial (doctor sem
@@ -507,6 +539,10 @@ export function makeDb(initial = {}) {
           error: null,
         })),
         deleteUser: vi.fn(async () => ({ data: {}, error: null })),
+        generateLink: vi.fn(async ({ email }) => ({
+          data: { properties: { action_link: `https://mock.local/invite/${email}` } },
+          error: null,
+        })),
       },
     },
   };

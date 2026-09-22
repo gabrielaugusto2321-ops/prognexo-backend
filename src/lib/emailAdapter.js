@@ -71,6 +71,24 @@ export function resendEmailAdapter({ apiKey = env.RESEND_API_KEY, fetchImpl = gl
   };
 }
 
+// Reenvio de convite de médico de cortesia (src/routes/adminDoctors.js).
+// `supabase.auth.resend({type:'signup'})` é documentado pro fluxo signUp()
+// client-side (aquele que popula confirmation_sent_at) — NÃO é garantido
+// reenviar o convite de inviteUserByEmail (ação 'invite' no GoTrue, rastreada
+// separada da ação 'signup'). O mecanismo correto e documentado pra regenerar
+// um convite existente é generateLink({type:'invite'}) — nunca cria usuário
+// duplicado (reaproveita o auth.users já criado), mas NÃO envia e-mail
+// sozinho, então enviamos nós mesmos via Resend (reaproveita buildResendRequest,
+// já usado pelo outbox de convites de equipe).
+export async function sendCourtesyInviteEmail({ to, actionLink, clinicName, apiKey = env.RESEND_API_KEY, fetchImpl = globalThis.fetch }) {
+  if (env.NODE_ENV === 'test') throw new Error('resend_disabled_in_test');
+  if (!apiKey) throw new Error('resend_not_configured');
+  const { url, init } = buildResendRequest({ apiKey, to, actionLink, organizationName: clinicName });
+  const response = await fetchImpl(url, init);
+  if (!response.ok) throw new Error('email_delivery_failed');
+  return response.json();
+}
+
 let devFake;
 export function configuredTeamInviteEmailAdapter() {
   if (env.NODE_ENV !== 'test' && env.TEAM_INVITE_OUTBOX_ENABLED === 'true' && env.TEAM_INVITE_EMAIL_DELIVERY_ENABLED === 'true') {

@@ -22,6 +22,7 @@ import dashboardRoutes from './routes/dashboard.js';
 import teamRoutes from './routes/team.js';
 import teamInvitationRoutes from './routes/teamInvitations.js';
 import doctorsRoutes from './routes/doctors.js';
+import adminDoctorsRoutes from './routes/adminDoctors.js';
 import signupRoutes from './routes/signup.js';
 import activationRoutes from './routes/activation.js';
 import integrationsRoutes from './routes/integrations.js';
@@ -53,6 +54,7 @@ const ROUTE_MOUNTS = [
   ['/team/invitations', teamInvitationRoutes],
   ['/team', teamRoutes],
   ['/doctors', doctorsRoutes],
+  ['/admin/doctors', adminDoctorsRoutes],
   ['/signup', signupRoutes],
   ['/activation', activationRoutes],
   ['/integrations', integrationsRoutes],

@@ -71,6 +71,10 @@ const schema = z.object({
   CAPTCHA_PROVIDER: z.string().default('turnstile'),
   CAPTCHA_SECRET: optionalSecret,
 
+  // Cadastro publico nasce fechado: o frontend ainda nao envia captchaToken.
+  // So habilitar depois de validar o CAPTCHA ponta a ponta em producao.
+  PUBLIC_SIGNUP_ENABLED: bool.default('false'),
+
   // Webhooks — todos os gates começam FECHADOS para produção.
   WHATSAPP_WEBHOOK_SIGNATURE_ENFORCED: bool.default('true'),
   PAYMENT_WEBHOOKS_ENABLED: bool.default('false'),

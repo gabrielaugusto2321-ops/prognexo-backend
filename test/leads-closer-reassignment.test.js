@@ -68,7 +68,10 @@ describe('PATCH /leads/:id closer reassignment', () => {
     expectSynced(C1);
     expect(db.tables.leads[0].status_atual).toBe(statusAntes);
     expect(db.tables.leads[0].nome).toBe(nomeAntes);
-    expect(db.client.rpc).not.toHaveBeenCalled();
+    // requireAuth agora chama doctor_access_gate em toda requisição
+    // autenticada — o que importa aqui é que reassign_lead_closer
+    // especificamente nunca foi chamada antes da guarda de payload misto.
+    expect(db.client.rpc).not.toHaveBeenCalledWith('reassign_lead_closer', expect.anything());
   });
   it('atribuição isolada (só sdr_responsavel_id) continua funcionando após a guarda de payload misto', async () => {
     const res = await request(await app('false')).patch(`/leads/${LEAD}`).set(hdr('doc')).send({ sdr_responsavel_id: C2 });

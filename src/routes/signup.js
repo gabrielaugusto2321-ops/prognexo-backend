@@ -4,6 +4,7 @@ import { supabase } from '../lib/supabase.js';
 import { verifyCaptcha } from '../lib/captcha.js';
 import { logger } from '../lib/logger.js';
 import { signupHourlyLimiter, signupDailyLimiter } from '../middleware/rateLimits.js';
+import { env } from '../config/env.js';
 
 const router = Router();
 
@@ -23,9 +24,12 @@ const schema = z
   })
   .strip();
 
-// POST /signup — rota PÚBLICA. Sempre responde 202 (anti-enumeração):
-// nunca revela se o e-mail já tem conta.
+// POST /signup — rota PÚBLICA. Com o recurso habilitado, responde 202
+// (anti-enumeração) e nunca revela se o e-mail já tem conta.
 router.post('/', signupHourlyLimiter, signupDailyLimiter, async (req, res) => {
+  if (env.NODE_ENV === 'production' && env.PUBLIC_SIGNUP_ENABLED !== 'true') {
+    return res.status(503).json({ error: 'signup_temporarily_unavailable' });
+  }
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'invalid_signup_data' });
 
