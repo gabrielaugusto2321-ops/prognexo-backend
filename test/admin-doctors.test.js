@@ -122,15 +122,54 @@ describe('admin doctors mutations', () => {
     const usersBefore = db.tables.users.length;
     const response = await request(await app()).post(`/admin/doctors/${pendingDoctorId}/resend-invite`).set(auth('admin')).send({});
     expect(response.status).toBe(200);
-    // generateLink({type:'invite'}) regenera o link SEM criar um segundo
-    // auth.users/doctor — nunca chama inviteUserByEmail de novo.
+    // BUG REAL DE PRODUÇÃO: generateLink({type:'invite'}) pra um e-mail que já
+    // existe em auth.users falha com 422 email_exists — 'invite' só serve pro
+    // PRIMEIRO acesso. O reenvio precisa de type:'recovery' (mecanismo
+    // documentado no SDK pra gerar novo link de acesso a um usuário
+    // existente), nunca chama inviteUserByEmail de novo.
     expect(db.client.auth.admin.inviteUserByEmail).not.toHaveBeenCalled();
     expect(db.client.auth.admin.generateLink).toHaveBeenCalledWith({
-      type: 'invite',
+      type: 'recovery',
       email: 'pendente@test.com',
-      options: { redirectTo: expect.stringMatching(/^https?:\/\/.+\/$/) },
+      options: { redirectTo: expect.stringMatching(/^https?:\/\/.+\/\?flow=invite_pending$/) },
     });
+    const [resendCallArgs] = db.client.auth.admin.generateLink.mock.calls[0];
+    expect(resendCallArgs.options.redirectTo).not.toContain('vercel.app');
     expect(sendCourtesyInviteEmail).toHaveBeenCalledWith(expect.objectContaining({ to: 'pendente@test.com', actionLink: expect.stringContaining('pendente@test.com') }));
     expect(db.tables.users).toHaveLength(usersBefore);
+  });
+
+  it('reenvio pra e-mail que JÁ existe nunca dispara o email_exists real: prova que resend-invite não usa mais generateLink({type:"invite"})', async () => {
+    // Regressão do bug de produção: o mock simula o erro real do GoTrue
+    // (422 email_exists) quando type:'invite' é chamado pra um e-mail que já
+    // está em auth.users — exatamente o que aconteceu com o primeiro
+    // onboarding real. Se o código voltar a usar 'invite' aqui, este teste
+    // falha reproduzindo o mesmo erro que quebrou em produção.
+    const pendingDoctorId = U(16);
+    const pendingOwnerId = U(17);
+    db.tables.users.push({ id: pendingOwnerId, email: 'ja-existe@test.com', role: 'doctor', ativo: false, status: 'pending' });
+    db.tables.doctors.push({ id: pendingDoctorId, owner_user_id: pendingOwnerId, nome: 'Clinica Existente', status: 'prospect', criado_em: new Date().toISOString(), courtesy_expires_at: null });
+
+    const response = await request(await app()).post(`/admin/doctors/${pendingDoctorId}/resend-invite`).set(auth('admin')).send({});
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ ok: true });
+  });
+
+  it('reenvio não duplica auth.users nem doctors, mesmo chamado duas vezes seguidas', async () => {
+    const pendingDoctorId = U(18);
+    const pendingOwnerId = U(19);
+    db.tables.users.push({ id: pendingOwnerId, email: 'duplo@test.com', role: 'doctor', ativo: false, status: 'pending' });
+    db.tables.doctors.push({ id: pendingDoctorId, owner_user_id: pendingOwnerId, nome: 'Clinica Duplo', status: 'prospect', criado_em: new Date().toISOString(), courtesy_expires_at: null });
+    const usersBefore = db.tables.users.length;
+    const doctorsBefore = db.tables.doctors.length;
+
+    const api = await app();
+    const first = await request(api).post(`/admin/doctors/${pendingDoctorId}/resend-invite`).set(auth('admin')).send({});
+    const second = await request(api).post(`/admin/doctors/${pendingDoctorId}/resend-invite`).set(auth('admin')).send({});
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(db.client.auth.admin.inviteUserByEmail).not.toHaveBeenCalled();
+    expect(db.tables.users).toHaveLength(usersBefore);
+    expect(db.tables.doctors).toHaveLength(doctorsBefore);
   });
 });

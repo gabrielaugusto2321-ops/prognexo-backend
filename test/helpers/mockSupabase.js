@@ -539,10 +539,25 @@ export function makeDb(initial = {}) {
           error: null,
         })),
         deleteUser: vi.fn(async () => ({ data: {}, error: null })),
-        generateLink: vi.fn(async ({ email }) => ({
-          data: { properties: { action_link: `https://mock.local/invite/${email}` } },
-          error: null,
-        })),
+        // Espelha o comportamento real do GoTrue: type:'invite' pra um e-mail
+        // que já existe em auth.users falha com email_exists (422) — foi
+        // exatamente esse erro em produção que provou que resend-invite não
+        // pode reusar 'invite' pra reenviar acesso a uma conta já criada.
+        // type:'recovery' é o mecanismo correto pra gerar novo link de acesso
+        // (definir/redefinir senha) pra um usuário que já existe.
+        generateLink: vi.fn(async ({ type, email }) => {
+          const exists = (tables.users || []).some((u) => u.email === email);
+          if (type === 'invite' && exists) {
+            return {
+              data: { properties: null },
+              error: { message: 'User with this email address has already been registered', status: 422, code: 'email_exists' },
+            };
+          }
+          return {
+            data: { properties: { action_link: `https://mock.local/${type}/${email}`, verification_type: type } },
+            error: null,
+          };
+        }),
       },
     },
   };

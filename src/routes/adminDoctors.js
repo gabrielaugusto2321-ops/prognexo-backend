@@ -96,21 +96,28 @@ router.post('/:id/resend-invite', async (req, res) => {
   if (doctor.status !== 'prospect' || owner.status !== 'pending') {
     return res.status(409).json({ error: 'not_invitable' });
   }
-  // resend({type:'signup'}) e documentado pro fluxo signUp() client-side, nao
-  // pro convite admin (inviteUserByEmail = acao 'invite' no GoTrue, rastreada
-  // separada de 'signup' — nao ha garantia de que funcione aqui). O mecanismo
-  // correto e documentado pra regenerar um convite existente e
-  // generateLink({type:'invite'}) — NUNCA cria um segundo usuario/tenant pro
-  // mesmo e-mail (reaproveita o auth.users ja criado), mas nao envia e-mail
-  // sozinho, entao enviamos nos mesmos via Resend (sendCourtesyInviteEmail).
+  // BUG REAL DE PRODUÇÃO (primeiro onboarding): generateLink({type:'invite'})
+  // pra um e-mail que JÁ existe em auth.users (o POST / inicial já criou via
+  // inviteUserByEmail) falha com 422 email_exists — 'invite' só serve pra
+  // criar o PRIMEIRO acesso de um e-mail novo. O mecanismo documentado no SDK
+  // pra gerar um novo link de acesso (definir/redefinir senha) pra um usuário
+  // que já existe é generateLink({type:'recovery'}) — nunca cria um segundo
+  // auth.users nem um segundo tenant, só emite um novo token pro mesmo user.
+  //
+  // `flow=invite_pending` na query (não no hash — o hash é todo sobrescrito
+  // pelo redirect do GoTrue) é o que permite o App.jsx distinguir "isto é
+  // ativação de convite pendente" de uma recuperação de senha de conta já
+  // ativa (ForgotPassword.jsx), já que os dois usam type=recovery no hash
+  // final. Sem essa distinção, SetPassword cairia em modo='redefinicao' e
+  // NUNCA chamaria /activation/complete — a conta ficaria pending pra sempre.
   let redirectTo;
   try {
-    redirectTo = canonicalAuthRedirectTo();
+    redirectTo = `${canonicalAuthRedirectTo()}?flow=invite_pending`;
   } catch (err) {
     req.log?.error({ err }, 'Courtesy invite redirect misconfigured');
     return res.status(500).json({ error: 'internal_error', requestId: req.id });
   }
-  const link = await supabase.auth.admin.generateLink({ type: 'invite', email: owner.email, options: { redirectTo } });
+  const link = await supabase.auth.admin.generateLink({ type: 'recovery', email: owner.email, options: { redirectTo } });
   if (link.error || !link.data?.properties?.action_link) {
     req.log?.error({ err: link.error }, 'Courtesy invite link generation failed');
     return res.status(502).json({ error: 'invite_resend_failed' });
