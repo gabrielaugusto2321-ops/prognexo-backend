@@ -5,6 +5,7 @@ import { verifyCaptcha } from '../lib/captcha.js';
 import { logger } from '../lib/logger.js';
 import { signupHourlyLimiter, signupDailyLimiter } from '../middleware/rateLimits.js';
 import { env } from '../config/env.js';
+import { canonicalAuthRedirectTo } from '../lib/authRedirect.js';
 
 const router = Router();
 
@@ -46,7 +47,11 @@ router.post('/', signupHourlyLimiter, signupDailyLimiter, async (req, res) => {
     if (existing) return res.status(202).json({ ok: true });
 
     // Envia o convite (define senha + confirma e-mail no mesmo link).
-    const { data, error } = await supabase.auth.admin.inviteUserByEmail(email, { data: { nome } });
+    // redirectTo explícito: nunca depender da Site URL do painel Supabase.
+    const { data, error } = await supabase.auth.admin.inviteUserByEmail(email, {
+      data: { nome },
+      redirectTo: canonicalAuthRedirectTo(),
+    });
     if (error || !data?.user) {
       logger.info({ err: error }, 'Signup invite rejected');
       return res.status(202).json({ ok: true });

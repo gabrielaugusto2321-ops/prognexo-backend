@@ -67,6 +67,13 @@ describe('admin doctors mutations', () => {
     expect(first.status).toBe(201);
     expect(db.tables.organization_doctor_map).toHaveLength(2);
     expect(db.tables.organization_doctor_map[1].organization_id).not.toBe(ORG);
+    // Regressão do primeiro onboarding real: sem redirectTo explícito, o link
+    // de convite depende da Site URL do painel do Supabase — que pode estar
+    // desatualizada (domínio antigo) sem nada acusar isso nos testes.
+    expect(db.client.auth.admin.inviteUserByEmail).toHaveBeenCalledWith(
+      'nova@test.com',
+      expect.objectContaining({ redirectTo: expect.stringMatching(/^https?:\/\/.+\/$/) }),
+    );
     const second = await request(api).post('/admin/doctors').set(auth('admin')).send(body);
     expect(second.status).toBe(409);
     expect(db.client.auth.admin.inviteUserByEmail).toHaveBeenCalledTimes(1);
@@ -118,7 +125,11 @@ describe('admin doctors mutations', () => {
     // generateLink({type:'invite'}) regenera o link SEM criar um segundo
     // auth.users/doctor — nunca chama inviteUserByEmail de novo.
     expect(db.client.auth.admin.inviteUserByEmail).not.toHaveBeenCalled();
-    expect(db.client.auth.admin.generateLink).toHaveBeenCalledWith({ type: 'invite', email: 'pendente@test.com' });
+    expect(db.client.auth.admin.generateLink).toHaveBeenCalledWith({
+      type: 'invite',
+      email: 'pendente@test.com',
+      options: { redirectTo: expect.stringMatching(/^https?:\/\/.+\/$/) },
+    });
     expect(sendCourtesyInviteEmail).toHaveBeenCalledWith(expect.objectContaining({ to: 'pendente@test.com', actionLink: expect.stringContaining('pendente@test.com') }));
     expect(db.tables.users).toHaveLength(usersBefore);
   });

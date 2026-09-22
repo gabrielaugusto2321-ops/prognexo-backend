@@ -4,6 +4,7 @@ import { supabase } from '../lib/supabase.js';
 import { requireAuth } from '../middleware/auth.js';
 import { isPlatformAdminUser } from '../lib/tenantContext.js';
 import { sendCourtesyInviteEmail } from '../lib/emailAdapter.js';
+import { canonicalAuthRedirectTo } from '../lib/authRedirect.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -62,7 +63,7 @@ router.post('/', async (req, res) => {
 
   let authUserId;
   try {
-    const invitation = await supabase.auth.admin.inviteUserByEmail(email, { data: { nome } });
+    const invitation = await supabase.auth.admin.inviteUserByEmail(email, { data: { nome }, redirectTo: canonicalAuthRedirectTo() });
     if (invitation.error || !invitation.data?.user) return res.status(502).json({ error: 'invite_failed' });
     authUserId = invitation.data.user.id;
     const provision = await supabase.rpc('signup_provision_tenant', {
@@ -102,7 +103,14 @@ router.post('/:id/resend-invite', async (req, res) => {
   // generateLink({type:'invite'}) — NUNCA cria um segundo usuario/tenant pro
   // mesmo e-mail (reaproveita o auth.users ja criado), mas nao envia e-mail
   // sozinho, entao enviamos nos mesmos via Resend (sendCourtesyInviteEmail).
-  const link = await supabase.auth.admin.generateLink({ type: 'invite', email: owner.email });
+  let redirectTo;
+  try {
+    redirectTo = canonicalAuthRedirectTo();
+  } catch (err) {
+    req.log?.error({ err }, 'Courtesy invite redirect misconfigured');
+    return res.status(500).json({ error: 'internal_error', requestId: req.id });
+  }
+  const link = await supabase.auth.admin.generateLink({ type: 'invite', email: owner.email, options: { redirectTo } });
   if (link.error || !link.data?.properties?.action_link) {
     req.log?.error({ err: link.error }, 'Courtesy invite link generation failed');
     return res.status(502).json({ error: 'invite_resend_failed' });

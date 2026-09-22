@@ -168,7 +168,9 @@ describe('BLOQUEADOR — POST /team não pode contornar o outbox de convites', (
   const res = await request(await app(true, { membershipsOn: false, outboxOn: false }))
    .post('/team').set(auth('owner-token')).send({ doctor_id: DOC_A, nome: 'Legado', email: 'legado@x.test' });
   expect(res.status).toBe(201);
-  expect(spy).toHaveBeenCalledWith('legado@x.test');
+  // redirectTo explícito (env.FRONTEND_URL) — nunca depender da Site URL do
+  // painel Supabase. Ver src/lib/authRedirect.js.
+  expect(spy).toHaveBeenCalledWith('legado@x.test', expect.objectContaining({ redirectTo: expect.any(String) }));
  });
 
  it('chamada DIRETA e repetida ao endpoint antigo não contorna o outbox de nenhuma forma, mesmo tentando vários papéis/corpos', async () => {

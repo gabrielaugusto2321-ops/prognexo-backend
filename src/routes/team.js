@@ -6,6 +6,7 @@ import { attachTenantContext } from '../lib/tenantContext.js';
 import { shadowCompareTeam } from '../lib/teamShadowRead.js';
 import { teamMutationLimiter } from '../middleware/rateLimits.js';
 import { env } from '../config/env.js';
+import { canonicalAuthRedirectTo } from '../lib/authRedirect.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -237,7 +238,14 @@ router.post('/', teamMutationLimiter, requireTeamManager, async (req, res) => {
     return res.status(403).json({ error: 'Sem acesso a este médico' });
   }
 
-  const { data: authUser, error: authError } = await supabase.auth.admin.inviteUserByEmail(email);
+  let redirectTo;
+  try {
+    redirectTo = canonicalAuthRedirectTo();
+  } catch (err) {
+    req.log?.error({ err }, 'Team invite redirect misconfigured');
+    return res.status(500).json({ error: 'internal_error', requestId: req.id });
+  }
+  const { data: authUser, error: authError } = await supabase.auth.admin.inviteUserByEmail(email, { redirectTo });
   if (authError) {
     req.log?.error({ err: authError }, 'Team invite failed');
     return res.status(500).json({ error: 'internal_error', requestId: req.id });

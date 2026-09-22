@@ -32,6 +32,14 @@ describe('POST /signup (comportamental)', () => {
       .post('/signup')
       .send({ nome: 'Fulano', email: 'novo@a.test', plano: 'pago', role: 'admin', ativo: true, status: 'active' });
     expect(res.status).toBe(202);
+    // redirectTo explícito: nunca depender da Site URL do painel Supabase
+    // (foi exatamente a ausência disso que quebrou o primeiro onboarding real).
+    expect(db.client.auth.admin.inviteUserByEmail).toHaveBeenCalledWith(
+      'novo@a.test',
+      expect.objectContaining({ redirectTo: expect.stringMatching(/^https?:\/\/.+\/$/) }),
+    );
+    const [, inviteOptions] = db.client.auth.admin.inviteUserByEmail.mock.calls[0];
+    expect(inviteOptions.redirectTo).not.toContain('vercel.app');
     const user = db.tables.users.find((u) => u.email === 'novo@a.test');
     expect(user.role).toBe('doctor');
     expect(user.ativo).toBe(false);

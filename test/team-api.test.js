@@ -374,6 +374,12 @@ describe('/team — flag desligada (compat legado, sem regressão)', () => {
     const res = await request(a).post('/team').set(bearer('ownerA')).send({ doctor_id: DOC_A, nome: 'X', email: 'legacy@x.com' });
     expect(res.status).toBe(201);
     expect(res.body.role).toBe('closer');
+    // redirectTo explícito: mesma causa raiz corrigida em signup.js e
+    // adminDoctors.js — nunca depender da Site URL do painel Supabase.
+    expect(db.client.auth.admin.inviteUserByEmail).toHaveBeenCalledWith(
+      'legacy@x.com',
+      expect.objectContaining({ redirectTo: expect.stringMatching(/^https?:\/\/.+\/$/) }),
+    );
   });
 
   it('DELETE /team/:userId continua removendo só o vínculo legado', async () => {
