@@ -6,6 +6,9 @@ import { makeDb } from './helpers/mockSupabase.js';
 // Boot em produção com os webhooks de pagamento LIGADOS e assinatura ENFORCED,
 // para provar que a verificação HMAC do paymentFactory funciona de ponta a ponta.
 process.env.NODE_ENV = 'production';
+// server.js escuta em produção; porta efêmera evita EADDRINUSE (3333) contra
+// outros testes que também sobem o app em produção, em workers paralelos.
+process.env.PORT = '0';
 process.env.SUPABASE_URL = 'https://x.test';
 process.env.SUPABASE_SERVICE_ROLE_KEY = 'x';
 process.env.ANTHROPIC_API_KEY = 'x';

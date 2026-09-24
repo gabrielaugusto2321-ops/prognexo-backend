@@ -278,6 +278,74 @@ export function makeDb(initial = {}) {
   function ok(data) { return { data, error: null }; }
 
   const RPCS = {
+    lead_form_submit({ p_public_id, p_nome, p_email, p_telefone, p_telefone_normalizado, p_consent, p_page_origin, p_page_url, p_utm, p_ip_hash }) {
+      if (typeof p_telefone_normalizado !== 'string' || !/^55[0-9]{10,11}$/.test(p_telefone_normalizado)) return rpcErr('invalid_phone');
+      p_consent = !!p_consent;
+      const form = table('lead_capture_forms').find((row) => row.public_id === p_public_id && row.active === true);
+      if (!form) return rpcErr('form_not_found');
+      // Sem o texto exibido não há prova: nunca aceitar o envio (espelha o SQL).
+      if (!table('lead_capture_form_consent_versions').some((row) => row.form_id === form.id && row.version === form.consent_version)) return rpcErr('consent_version_missing');
+      const now = new Date();
+      const cryptoHash = (value) => {
+        // Hash determinístico suficiente para o espelho em memória; o SQL usa SHA-256 real.
+        let hash = 0; for (const char of value) hash = ((hash << 5) - hash + char.charCodeAt(0)) | 0;
+        return `mock-sha256-${Math.abs(hash)}`;
+      };
+      const phoneHash = cryptoHash(p_telefone_normalizado);
+      // Escopo estrito no médico do formulário. Lead legado sem telefone_normalizado
+      // casa pelos dígitos do telefone bruto (com ou sem 55); o normalizado ganha.
+      const digits = (value) => String(value ?? '').replace(/[^0-9]/g, '');
+      const candidates = table('leads').filter((row) => row.doctor_id === form.doctor_id
+        && (row.telefone_normalizado === p_telefone_normalizado
+          || (row.telefone_normalizado == null && [p_telefone_normalizado, p_telefone_normalizado.slice(2)].includes(digits(row.telefone)))));
+      candidates.sort((a, b) => Number(b.telefone_normalizado != null) - Number(a.telefone_normalizado != null));
+      let lead = candidates[0];
+      const recent = table('lead_capture_submissions').filter((row) => row.form_id === form.id && row.phone_hash === phoneHash && new Date(row.criado_em) >= new Date(now.getTime() - 600000));
+      let outcome = 'unchanged'; let applied = false; let block = null;
+      if (recent.length > 3) outcome = 'throttled';
+      else if (!lead) {
+        lead = { id: `mock-leads-${table('leads').length + 1}`, doctor_id: form.doctor_id, organization_id: form.organization_id ?? null,
+          nome: p_nome, email: p_email, telefone: p_telefone, telefone_normalizado: p_telefone_normalizado,
+          origem: 'formulario_captacao', origem_lead: form.name?.slice(0, 120), utm_source: p_utm?.utm_source ?? null,
+          utm_campaign: p_utm?.utm_campaign ?? null, utm_criativo: p_utm?.utm_content ?? p_utm?.utm_criativo ?? null,
+          journey_type: 'low_ticket', status_atual: form.pipeline_stage,
+          whatsapp_authorization_status: p_consent ? 'autorizado' : 'pendente',
+          whatsapp_authorization_at: p_consent ? now.toISOString() : null,
+          whatsapp_authorization_source: p_consent ? `lead_form:${p_public_id}` : null };
+        table('leads').push(lead); outcome = 'created'; applied = !!p_consent;
+      } else {
+        let changed = false;
+        // Primeiro toque preservado: só preenche o que está NULL.
+        for (const [field, value] of [['email',p_email],['telefone_normalizado',p_telefone_normalizado],['origem','formulario_captacao'],['utm_source',p_utm?.utm_source],['utm_campaign',p_utm?.utm_campaign],['utm_criativo',p_utm?.utm_content ?? p_utm?.utm_criativo]]) {
+          if (lead[field] == null && value != null) { lead[field] = value; changed = true; }
+        }
+        if (p_consent) {
+          const current = lead.whatsapp_authorization_status ?? 'pendente';
+          if (current === 'pendente') {
+            lead.whatsapp_authorization_status = 'autorizado'; lead.whatsapp_authorization_at = now.toISOString();
+            lead.whatsapp_authorization_source = `lead_form:${p_public_id}`; applied = true; changed = true;
+          } else if (current === 'opt_out') block = 'previous_opt_out';
+          else if (current === 'recusado') block = 'previous_recusado';
+          else if (current === 'autorizado') block = 'already_authorized';
+        }
+        outcome = changed ? 'updated' : 'unchanged';
+      }
+      // Cartão do funil: qualquer deal do lead conta; etapa do formulário só p/ lead novo.
+      if (outcome !== 'throttled' && lead && !table('deals').some((row) => row.lead_id === lead.id)) {
+        const stages = ['lead', 'conversa_iniciada', 'reuniao_marcada', 'proposta', 'fechado', 'perdido'];
+        const etapa = outcome === 'created' ? form.pipeline_stage : (stages.includes(lead.status_atual) ? lead.status_atual : 'lead');
+        table('deals').push({ id: `mock-deals-${table('deals').length + 1}`, lead_id: lead.id,
+          etapa, sdr_responsavel_id: lead.sdr_responsavel_id ?? null, product_id: null });
+      }
+      const version = table('lead_capture_form_consent_versions').find((row) => row.form_id === form.id && row.version === form.consent_version);
+      table('lead_capture_submissions').push({ id: `mock-lead_capture_submissions-${table('lead_capture_submissions').length + 1}`,
+        form_id: form.id, doctor_id: form.doctor_id, organization_id: form.organization_id ?? null, lead_id: lead?.id ?? null,
+        phone_hash: phoneHash, consent_given: !!p_consent, consent_applied: applied, consent_block_reason: block,
+        consent_version: form.consent_version, consent_text_snapshot: version?.consent_text ?? '', consented_at: p_consent ? now.toISOString() : null,
+        page_origin: p_page_origin, page_url: p_page_url?.slice(0, 500) ?? null, utm: p_utm || {}, ip_hash: p_ip_hash,
+        outcome, criado_em: now.toISOString() });
+      return ok([{ lead_id: lead?.id ?? null, outcome, consent_applied: applied, redirect_url: form.redirect_url ?? null, success_message: form.success_message ?? null }]);
+    },
     // Espelha migrations/0021_doctor_courtesy_expiration.sql's
     // doctor_access_gate: idem à decisão de bloqueio em uma única "query".
     // Nunca bloqueia em caso de ambiguidade (ver comentário na migration).

@@ -6,6 +6,7 @@ import helmet from 'helmet';
 import pinoHttp from 'pino-http';
 
 import { env } from './config/env.js';
+import { clientIp } from './middleware/clientIp.js';
 import { logger } from './lib/logger.js';
 import {
   assertRateLimitStoreReady,
@@ -39,6 +40,8 @@ import knowledgeBaseRoutes from './routes/knowledgeBase.js';
 import bdrRoutes from './routes/bdr.js';
 import campanhasRoutes from './routes/campanhas.js';
 import tenantRoutes from './routes/tenant.js';
+import leadFormsRoutes from './routes/leadForms.js';
+import publicLeadFormsRoutes from './routes/publicLeadForms.js';
 
 import whatsappWebhook from './webhooks/whatsapp.js';
 import pagarmeWebhook from './webhooks/pagarme.js';
@@ -69,13 +72,19 @@ const ROUTE_MOUNTS = [
   ['/bdr', bdrRoutes],
   ['/campanhas', campanhasRoutes],
   ['/tenant', tenantRoutes],
+  ['/lead-forms', leadFormsRoutes],
+  ['/public/lead-forms', publicLeadFormsRoutes],
 ];
 
 export function createApp() {
   const app = express();
 
-  // Atrás do CDN/proxy: confia num único hop para ler o IP real (rate-limit).
-  app.set('trust proxy', 1);
+  // Atrás do CDN/proxy: quantos hops confiar para ler o IP real (rate-limit).
+  // Padrão 1 (histórico). Ver TRUST_PROXY_HOPS em config/env.js.
+  app.set('trust proxy', env.TRUST_PROXY_HOPS);
+  // Com TRUST_CLOUDFLARE_HEADERS=true, req.ip vira o IP real (CF-Connecting-IP)
+  // em vez do IP da borda do Cloudflare. Antes de qualquer rate limit.
+  app.use(clientIp);
 
   const allowedOrigins = (env.CORS_ALLOWED_ORIGINS || env.FRONTEND_URL || '')
     .split(',')
@@ -83,16 +92,24 @@ export function createApp() {
     .filter(Boolean);
 
   app.use(helmet({ contentSecurityPolicy: false })); // a API não serve HTML
+  const corsOptions = {
+    credentials: false, // autenticação é por Bearer token, nunca cookie
+    origin(origin, cb) {
+      // Sem Origin = chamada servidor-a-servidor (webhook, curl) — permitida.
+      if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+      const error = new Error('cors_denied');
+      error.status = 403;
+      cb(error);
+    },
+  };
   app.use(
-    cors({
-      credentials: false, // autenticação é por Bearer token, nunca cookie
-      origin(origin, cb) {
-        // Sem Origin = chamada servidor-a-servidor (webhook, curl) — permitida.
-        if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
-        const error = new Error('cors_denied');
-        error.status = 403;
-        cb(error);
-      },
+    cors((req, optionsCb) => {
+      // Formulários de captação: a página do iframe é servida por esta própria
+      // API, então o POST é same-origin (o navegador manda Origin = esta API).
+      // Sem CORS aqui, e sem rejeitar; o controle de quem pode usar o formulário
+      // é o embed token + frame-ancestors, não o CORS.
+      if (req.path.startsWith('/public/lead-forms')) return optionsCb(null, { origin: false });
+      return optionsCb(null, corsOptions);
     })
   );
 

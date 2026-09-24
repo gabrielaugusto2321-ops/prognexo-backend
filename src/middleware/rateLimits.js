@@ -40,7 +40,7 @@ export function assertRateLimitStoreReady() {
 const base = { standardHeaders: true, legacyHeaders: false, message: { error: 'rate_limited' }, store };
 
 // IPv6-safe: agrupa por prefixo /64 quando a chave é o IP.
-function ipKey(req) {
+export function ipKey(req) {
   const ip = req.ip || '';
   return ip.includes(':') ? ip.split(':').slice(0, 4).join(':') : ip;
 }
@@ -78,3 +78,8 @@ export const teamMutationLimiter = rateLimit({
   limit: 20,
   keyGenerator: (req) => req.user?.id || ipKey(req),
 });
+
+export const leadFormIpMinuteLimiter = rateLimit({ ...base, windowMs: 60_000, limit: 10, keyGenerator: ipKey });
+export const leadFormIpHourlyLimiter = rateLimit({ ...base, windowMs: 60 * 60_000, limit: 60, keyGenerator: ipKey });
+export const leadFormEmbedLimiter = rateLimit({ ...base, windowMs: 60_000, limit: 60, keyGenerator: (req) => `${req.params.publicId}:${ipKey(req)}` });
+export const leadFormPublicIdLimiter = rateLimit({ ...base, windowMs: 60_000, limit: 120, keyGenerator: (req) => req.params.publicId });

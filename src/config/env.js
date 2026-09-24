@@ -67,9 +67,18 @@ const schema = z.object({
   CORS_ALLOWED_ORIGINS: z.string().optional(),
 
   // CAPTCHA
+  // Só ligar quando o serviço estiver atrás do Cloudflare (Render): passa a usar
+  // o header CF-Connecting-IP como IP do cliente. Ver src/middleware/clientIp.js.
+  TRUST_CLOUDFLARE_HEADERS: bool.default('false'),
+  // Quantos proxies confiar ao ler X-Forwarded-For (Express `trust proxy`). 1 =
+  // comportamento histórico. Só mudar com a posição do cliente PROVADA por
+  // scripts/ip-probe.mjs num serviço de teste (chain: cliente, borda Cloudflare).
+  TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(5).default(1),
   CAPTCHA_ENABLED: bool.default('false'),
   CAPTCHA_PROVIDER: z.string().default('turnstile'),
   CAPTCHA_SECRET: optionalSecret,
+  CAPTCHA_SITE_KEY: z.string().optional(),
+  LEAD_FORM_EMBED_SECRET: optionalSecret,
 
   // Cadastro publico nasce fechado: o frontend ainda nao envia captchaToken.
   // So habilitar depois de validar o CAPTCHA ponta a ponta em producao.

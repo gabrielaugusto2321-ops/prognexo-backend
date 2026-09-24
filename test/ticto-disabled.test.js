@@ -4,6 +4,9 @@ import request from 'supertest';
 // Este arquivo sobe o app em NODE_ENV=production para provar que o webhook da
 // Ticto (sem assinatura criptográfica) fica DESABILITADO por padrão.
 process.env.NODE_ENV = 'production';
+// server.js escuta em produção; porta efêmera evita EADDRINUSE (3333) contra
+// outros testes que também sobem o app em produção, em workers paralelos.
+process.env.PORT = '0';
 process.env.SUPABASE_URL = 'https://x.test';
 process.env.SUPABASE_SERVICE_ROLE_KEY = 'x';
 process.env.ANTHROPIC_API_KEY = 'x';
